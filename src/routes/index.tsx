@@ -61,11 +61,11 @@ function IndexPage() {
 function AuthScreen() {
   const { state, signIn, signUp, enterDemo } = useSahay();
   const [mode, setMode] = useState<"signin" | "signup">(
-    state.savedProfile ? "signin" : "signup",
+    state.profiles.length > 0 ? "signin" : "signup",
   );
-  const [name, setName] = useState(state.savedProfile?.name ?? "");
-  const [email, setEmail] = useState(state.savedProfile?.email ?? "");
-  const [phone, setPhone] = useState(state.savedProfile?.phone ?? "");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -81,16 +81,18 @@ function AuthScreen() {
       return;
     }
     setBusy(true);
-    const success =
+    const result =
       mode === "signup"
         ? signUp({ name: name.trim(), email: email.trim(), phone: phone.trim() })
         : signIn(email);
     setBusy(false);
-    if (!success) {
+    if (!result.ok) {
       setError(
-        state.savedProfile
-          ? "This device keeps one demo profile. Sign in with its saved email."
-          : "No profile is saved on this device yet. Create one first.",
+        result.reason === "duplicate"
+          ? "That email is already saved on this device. Sign in instead."
+          : result.reason === "reserved"
+            ? "That email belongs to the Asha demo. Use Open the companion, or choose another email."
+            : "No profile on this device uses that email. Create one first. This does not create a profile.",
       );
     }
   };
@@ -130,14 +132,17 @@ function AuthScreen() {
           Open the companion
         </Button>
         <p className="-mt-2 text-center text-[11px] text-muted-fg">
-          Loads a local demo profile so you can try Home, TEST SOS, and contacts.
+          Opens Asha’s demo profile. Profiles you created stay saved.
         </p>
 
-        {state.savedProfile ? (
+        {state.profiles.length > 0 ? (
           <div className="flex items-center gap-2.5 rounded-[13px] bg-secondary p-3">
             <Smartphone className="size-4 shrink-0 text-primary" />
             <p className="flex-1 text-xs font-medium leading-tight text-secondary-fg">
-              Your demo profile and data stay on this device.
+              {state.profiles.length === 1
+                ? "1 profile is saved on this device."
+                : `${state.profiles.length} profiles are saved on this device.`}{" "}
+              Sign in with the email you used.
             </p>
           </div>
         ) : null}
@@ -212,8 +217,8 @@ function AuthScreen() {
                 : "Continue with email"}
           </Button>
           <HelperText>
-            Passwordless prototype sign-in. No password is collected or stored,
-            and this is not a cloud account.
+            The email only selects a demo profile stored in this browser. It is
+            not a password and it is not account security.
           </HelperText>
         </form>
 
@@ -238,8 +243,9 @@ function AuthScreen() {
           <AlertDialogHeader>
             <AlertDialogTitle>About demo sign-in</AlertDialogTitle>
             <AlertDialogDescription>
-              This prototype stores its demo profile and activity locally on this
-              device. It has no cloud authentication.
+              Email only picks a profile already saved in this browser. It does
+              not check a password, and it is not a cloud account. Each profile
+              keeps its own contacts, history, and journeys on this device.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

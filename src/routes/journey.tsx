@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Flag, Info, LocateFixed, Navigation, Search, Timer } from "lucide-react";
 import { RequireUser } from "@/components/sahay/guard";
@@ -11,14 +11,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSahay } from "@/lib/sahay/context";
 import { planSafeRoutes, searchPlaces } from "@/lib/sahay/routing-api";
-import { journeyRemainingMs } from "@/lib/sahay/safety";
+import { countdownLabel } from "@/lib/sahay/safety";
 import {
   formatKm,
   formatWalkTime,
   type PlaceHit,
   type PlannedRoute,
 } from "@/lib/sahay/routing";
-import { formatDuration, formatSahayDate } from "@/lib/sahay/services";
+import { formatSahayDate } from "@/lib/sahay/services";
 
 export const Route = createFileRoute("/journey")({ component: JourneyPage });
 
@@ -49,14 +49,19 @@ function JourneyScreen() {
     simulateJourneyDelay,
     simulateJourneyOffRoute,
     endJourney,
+    setJourneyLocationWatch,
     requestLocation,
   } = useSahay();
   const active =
     state.journey && state.journey.status === "active" ? state.journey : null;
-  const remaining = useMemo(
-    () => (active ? formatDuration(journeyRemainingMs(active)) : ""),
-    [active, state.currentRisk.computedAt],
-  );
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active?.id]);
+  const remaining = active ? countdownLabel(active.expectedEndAt, now) : "";
 
   if (active) {
     return (
@@ -77,7 +82,7 @@ function JourneyScreen() {
             </p>
             <Badge tone={active.offRouteSimulated ? "warning" : "success"}>
               {active.selectedRoute?.kind === "safest"
-                ? "Safest path"
+                ? "Closer to services"
                 : active.offRouteSimulated
                   ? "Off-route demo"
                   : "On watch"}
@@ -89,17 +94,45 @@ function JourneyScreen() {
           {active.selectedRoute ? (
             <p className="text-[11px] text-muted-fg">
               {formatWalkTime(active.selectedRoute.durationSeconds)} ·{" "}
-              {formatKm(active.selectedRoute.distanceMeters)} · safety{" "}
-              {active.selectedRoute.safetyScore}/100
+              {formatKm(active.selectedRoute.distanceMeters)} · amenity score{" "}
+              {active.selectedRoute.safetyScore}/100. This is a map heuristic,
+              not proof the walk is safe.
             </p>
           ) : null}
           <div className="flex items-center gap-2 text-[13px] text-fg">
             <Timer className="size-4 text-primary" />
-            <span className="tabular-nums">{remaining} remaining</span>
+            <span className="tabular-nums">{remaining}</span>
           </div>
           <p className="text-[11px] text-muted-fg">
             Expected {formatSahayDate(active.expectedEndAt)}
           </p>
+          <div className="rounded-[13px] bg-card p-3">
+            <p className="text-[9px] font-bold tracking-[0.14em] text-muted-fg">
+              PHONE GPS
+            </p>
+            <p className="mt-1 text-[11px] leading-4 text-fg">
+              {active.locationWatchRequested ? "Foreground watching" : "Not watching"}
+              {active.liveOffRoute ? " · away from the chosen line" : ""}
+            </p>
+            <p className="mt-1 text-[11px] leading-4 text-muted-fg">
+              {active.locationWatchNote ??
+                "Turn this on to use the browser’s foreground location. It is not background tracking, and a missing fix is not treated as danger."}
+            </p>
+            {state.location.updatedAt ? (
+              <p className="mt-1 text-[11px] text-muted-fg">
+                Last phone update {formatSahayDate(state.location.updatedAt)}
+                {state.location.permission === "denied" ? " · permission denied" : ""}
+              </p>
+            ) : null}
+          </div>
+          <Button
+            size="compact"
+            variant="secondary"
+            onClick={() => setJourneyLocationWatch(!active.locationWatchRequested)}
+          >
+            <LocateFixed className="size-4" />
+            {active.locationWatchRequested ? "Stop location watch" : "Watch phone location"}
+          </Button>
         </Panel>
         <Button data-testid="journey-checkin" onClick={() => checkInJourney()}>
           I am okay — check in
@@ -294,15 +327,15 @@ function Planner({
   return (
     <SahayShell
       title="Safe Journey"
-      subtitle="Search like a map — then pick the safer walking path."
+      subtitle="Compare walking routes. The score is a map heuristic, not a safety guarantee."
     >
       <Panel className="flex-row items-start gap-2.5">
         <Info className="mt-0.5 size-4 shrink-0 text-warning" />
         <HelperText>
-          Routes come from OpenStreetMap walking paths. Each option is scored
-          by how close it stays to mapped police, hospitals, and pharmacies.
-          If they score the same, the shorter walk is listed first. This is not
-          a crime-trained model, and nothing is sent to your contacts.
+          Routes come from OpenStreetMap walking paths. The number on each walk
+          only reflects mapped police, hospitals, pharmacies, and extra
+          distance. It is not proof that a route is safe, and it is not based
+          on crime data. Nothing is sent to your contacts.
         </HelperText>
       </Panel>
 
@@ -314,7 +347,7 @@ function Planner({
           <div>
             <p className="text-sm font-semibold text-fg">Plan a walking route</p>
             <p className="text-[11px] text-muted-fg">
-              A closer-to-services walk is preferred when the scores differ.
+              A closer-to-services walk is listed first when the heuristic scores differ.
             </p>
           </div>
         </div>
@@ -361,7 +394,7 @@ function Planner({
           onClick={() => void findRoutes()}
         >
           <Search className="size-4" />
-          {busy === "search" ? "Finding safest path…" : "Find safest route"}
+          {busy === "search" ? "Comparing walks…" : "Compare walking routes"}
         </Button>
         {error ? (
           <p className="text-[13px] font-medium text-danger">{error}</p>
@@ -394,9 +427,7 @@ function Planner({
               >
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-semibold text-fg">{title}</p>
-                  <Badge tone={route.kind === "shortest" ? "success" : "neutral"}>
-                    {route.safetyScore}/100
-                  </Badge>
+                  <Badge tone="neutral">Score {route.safetyScore}</Badge>
                 </div>
                 <p className="mt-1 text-[11px] text-muted-fg">
                   {formatWalkTime(route.durationSeconds)} ·{" "}

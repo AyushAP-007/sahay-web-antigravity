@@ -15,6 +15,7 @@ import { Route as ContactsRouteImport } from './routes/contacts'
 import { Route as DeviceRouteImport } from './routes/device'
 import { Route as HistoryRouteImport } from './routes/history'
 import { Route as JourneyRouteImport } from './routes/journey'
+import { Route as LabRouteImport } from './routes/lab'
 import { Route as LocationRouteImport } from './routes/location'
 import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as ProfileEditRouteImport } from './routes/profile-edit'
@@ -51,6 +52,11 @@ const HistoryRoute = HistoryRouteImport.update({
 const JourneyRoute = JourneyRouteImport.update({
   id: '/journey',
   path: '/journey',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LabRoute = LabRouteImport.update({
+  id: '/lab',
+  path: '/lab',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LocationRoute = LocationRouteImport.update({
@@ -96,6 +102,7 @@ export interface FileRoutesByFullPath {
   '/device': typeof DeviceRoute
   '/history': typeof HistoryRoute
   '/journey': typeof JourneyRoute
+  '/lab': typeof LabRoute
   '/location': typeof LocationRoute
   '/notifications': typeof NotificationsRoute
   '/profile-edit': typeof ProfileEditRoute
@@ -111,6 +118,7 @@ export interface FileRoutesByTo {
   '/device': typeof DeviceRoute
   '/history': typeof HistoryRoute
   '/journey': typeof JourneyRoute
+  '/lab': typeof LabRoute
   '/location': typeof LocationRoute
   '/notifications': typeof NotificationsRoute
   '/profile-edit': typeof ProfileEditRoute
@@ -127,6 +135,7 @@ export interface FileRoutesById {
   '/device': typeof DeviceRoute
   '/history': typeof HistoryRoute
   '/journey': typeof JourneyRoute
+  '/lab': typeof LabRoute
   '/location': typeof LocationRoute
   '/notifications': typeof NotificationsRoute
   '/profile-edit': typeof ProfileEditRoute
@@ -144,6 +153,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/history'
     | '/journey'
+    | '/lab'
     | '/location'
     | '/notifications'
     | '/profile-edit'
@@ -159,6 +169,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/history'
     | '/journey'
+    | '/lab'
     | '/location'
     | '/notifications'
     | '/profile-edit'
@@ -174,6 +185,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/history'
     | '/journey'
+    | '/lab'
     | '/location'
     | '/notifications'
     | '/profile-edit'
@@ -190,6 +202,7 @@ export interface RootRouteChildren {
   DeviceRoute: typeof DeviceRoute
   HistoryRoute: typeof HistoryRoute
   JourneyRoute: typeof JourneyRoute
+  LabRoute: typeof LabRoute
   LocationRoute: typeof LocationRoute
   NotificationsRoute: typeof NotificationsRoute
   ProfileEditRoute: typeof ProfileEditRoute
@@ -241,6 +254,13 @@ declare module '@tanstack/react-router' {
       path: '/journey'
       fullPath: '/journey'
       preLoaderRoute: typeof JourneyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/lab': {
+      id: '/lab'
+      path: '/lab'
+      fullPath: '/lab'
+      preLoaderRoute: typeof LabRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/location': {
@@ -302,6 +322,7 @@ const rootRouteChildren: RootRouteChildren = {
   DeviceRoute: DeviceRoute,
   HistoryRoute: HistoryRoute,
   JourneyRoute: JourneyRoute,
+  LabRoute: LabRoute,
   LocationRoute: LocationRoute,
   NotificationsRoute: NotificationsRoute,
   ProfileEditRoute: ProfileEditRoute,

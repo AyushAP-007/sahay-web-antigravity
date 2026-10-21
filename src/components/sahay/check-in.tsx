@@ -54,7 +54,10 @@ export function CheckInHost() {
           <div className="flex-1">
             <p className="text-sm font-semibold text-fg">Are you okay?</p>
             <p className="text-[11px] text-muted-fg">
-              {eventLabel(pending.eventType)} · demo check-in
+              {pending.eventType === "CHECKIN_TIMEOUT"
+                ? "Motion check-in"
+                : eventLabel(pending.eventType)}{" "}
+              · demo
             </p>
           </div>
           <span className="rounded-full bg-warning-soft px-2.5 py-1 text-xs font-bold tabular-nums text-warning">

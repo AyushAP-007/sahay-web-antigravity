@@ -3,9 +3,17 @@ import type {
   EmergencyEvent,
   PhoneLocation,
   SahayState,
+  UserProfile,
 } from "./models";
-import { defaultSettings, simulatedDeviceService } from "./services";
-import { riskFromState } from "./safety";
+import {
+  emptyLibrary,
+  hydrateLibrary,
+  libraryFromLegacy,
+  type ProfileLibrary,
+} from "./profiles.ts";
+import { completeJourney } from "./geo.ts";
+import { defaultSettings, simulatedDeviceService } from "./services.ts";
+import { riskFromState } from "./safety.ts";
 
 const STORAGE_KEY = "sahay.phase1.local.v1";
 
@@ -15,9 +23,23 @@ export function loadLocalState(): unknown {
   return value === null ? null : JSON.parse(value);
 }
 
-export function saveLocalState(state: SahayState): void {
+export function saveProfileLibrary(library: ProfileLibrary): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
+}
+
+export function readStoredLibrary(raw: unknown): ProfileLibrary {
+  if (raw === null || raw === undefined) return emptyLibrary();
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Saved Sahay data has an invalid format.");
+  }
+  const version = (raw as { version?: unknown }).version;
+  if (version === 2) return hydrateLibrary(raw);
+  const savedProfile =
+    (raw as { savedProfile?: UserProfile | null }).savedProfile ?? null;
+  const state = migrateState(raw);
+  if (!state) return emptyLibrary();
+  return libraryFromLegacy(state, savedProfile);
 }
 
 export function emptyLocation(): PhoneLocation {
@@ -38,6 +60,7 @@ export function migrateState(raw: unknown): SahayState | null {
     throw new Error("Saved Sahay data has an invalid format.");
   }
   const parsed = raw as Partial<SahayState> & {
+    user?: UserProfile | null;
     device?: Partial<DeviceStatus>;
     location?: Partial<PhoneLocation>;
     events?: Array<Partial<EmergencyEvent>>;
@@ -52,11 +75,7 @@ export function migrateState(raw: unknown): SahayState | null {
       ...parsed.device?.sensor,
       simulated: true,
     },
-    userId:
-      parsed.device?.userId ??
-      parsed.user?.id ??
-      parsed.savedProfile?.id ??
-      null,
+    userId: parsed.device?.userId ?? parsed.user?.id ?? null,
   };
   const location: PhoneLocation = {
     ...emptyLocation(),
@@ -64,7 +83,7 @@ export function migrateState(raw: unknown): SahayState | null {
     accuracy:
       typeof parsed.location?.accuracy === "number"
         ? parsed.location.accuracy
-        : parsed.location?.accuracy ?? null,
+        : (parsed.location?.accuracy ?? null),
   };
   const settings = { ...defaultSettings, ...parsed.settings };
   const events = Array.isArray(parsed.events)
@@ -72,7 +91,7 @@ export function migrateState(raw: unknown): SahayState | null {
     : [];
   const draft: SahayState = {
     user: parsed.user ?? null,
-    savedProfile: parsed.savedProfile ?? null,
+    profiles: [],
     contacts: Array.isArray(parsed.contacts) ? parsed.contacts : [],
     events,
     activity: Array.isArray(parsed.activity) ? parsed.activity : [],
@@ -83,12 +102,16 @@ export function migrateState(raw: unknown): SahayState | null {
     location,
     settings,
     journey: parsed.journey
-      ? {
+      ? completeJourney({
           ...parsed.journey,
           destLat: parsed.journey.destLat ?? null,
           destLng: parsed.journey.destLng ?? null,
           selectedRoute: parsed.journey.selectedRoute ?? null,
-        }
+          liveOffRoute: parsed.journey.liveOffRoute ?? false,
+          locationWatchRequested: parsed.journey.locationWatchRequested ?? false,
+          deviationStreak: parsed.journey.deviationStreak ?? 0,
+          locationWatchNote: parsed.journey.locationWatchNote ?? null,
+        })
       : null,
     pendingCheckIn: parsed.pendingCheckIn ?? null,
     currentRisk: parsed.currentRisk ?? {

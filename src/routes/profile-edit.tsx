@@ -43,8 +43,12 @@ function ProfileEditScreen() {
       phone: phone.trim(),
     });
     setBusy(false);
-    if (!saved) {
-      setError("Profile could not be saved on this device. Please retry.");
+    if (!saved.ok) {
+      setError(
+        saved.reason === "duplicate"
+          ? "Another profile on this device already uses that email."
+          : "Profile could not be saved on this device. Please retry.",
+      );
       return;
     }
     void navigate({ to: "/settings" });

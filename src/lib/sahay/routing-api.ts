@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import {
+  describeRouteFailure,
   rankRoutes,
   type OsmContext,
   type PlaceHit,
@@ -82,7 +83,10 @@ async function osrmRoutes(
   profile: "foot" | "bike",
   from: PlaceHit,
   to: PlaceHit,
-): Promise<Array<Omit<PlannedRoute, "kind" | "safetyScore" | "reasons">>> {
+): Promise<
+  | { ok: true; routes: Array<Omit<PlannedRoute, "kind" | "safetyScore" | "reasons">> }
+  | { ok: false; reason: "network" | "none" }
+> {
   const host =
     profile === "foot"
       ? "https://routing.openstreetmap.de/routed-foot"
@@ -95,18 +99,23 @@ async function osrmRoutes(
       {},
       12000,
     );
-    if (payload.code !== "Ok" || !payload.routes?.length) return [];
-    return payload.routes.slice(0, 3).map((route, index) => ({
-      id: `${profile}-${index}`,
-      mode: profile,
-      distanceMeters: route.distance,
-      durationSeconds: route.duration,
-      geometry: (route.geometry?.coordinates ?? []).map(
-        (pair) => [pair[1]!, pair[0]!] as [number, number],
-      ),
-    }));
+    if (payload.code !== "Ok" || !payload.routes?.length) {
+      return { ok: false, reason: "none" };
+    }
+    return {
+      ok: true,
+      routes: payload.routes.slice(0, 3).map((route, index) => ({
+        id: `${profile}-${index}`,
+        mode: profile,
+        distanceMeters: route.distance,
+        durationSeconds: route.duration,
+        geometry: (route.geometry?.coordinates ?? []).map(
+          (pair) => [pair[1]!, pair[0]!] as [number, number],
+        ),
+      })),
+    };
   } catch {
-    return [];
+    return { ok: false, reason: "network" };
   }
 }
 
@@ -160,17 +169,18 @@ export const planSafeRoutes = createServerFn({ method: "POST" })
       data,
     }): Promise<{ routes: PlannedRoute[]; note: string }> => {
       const foot = await osrmRoutes("foot", data.from, data.to);
-      const merged = foot.filter((route) => route.geometry.length >= 2);
+      if (!foot.ok) {
+        throw new Error(describeRouteFailure(foot.reason));
+      }
+      const merged = foot.routes.filter((route) => route.geometry.length >= 2);
       if (merged.length === 0) {
-        throw new Error(
-          "No walking path was found between those places. Try a closer destination.",
-        );
+        throw new Error(describeRouteFailure("none"));
       }
       const osm = await loadOsmContext(merged[0]!.geometry);
       const ranked = rankRoutes(merged, osm, data.hour);
       const note = ranked.similar
-        ? "These walks score almost the same on nearby police, hospitals, and pharmacies. The shorter one is listed first. Street-lamp data is not available here, and this is not a crime-trained model."
-        : "Ranked by how close each walk stays to mapped police, hospitals, and pharmacies, then by extra distance. Not a crime dataset or a trained Random Forest.";
+        ? "These walks score almost the same on nearby mapped police, hospitals, and pharmacies, so the shorter one is listed first. The number is a distance-and-amenity heuristic, not proof that a walk is safe, and it is not crime data."
+        : "Ordered by a heuristic: how close each walk stays to mapped police, hospitals, and pharmacies, then by extra distance. The score is not proof of safety and not a crime dataset.";
       return { routes: ranked.routes, note };
     },
   );

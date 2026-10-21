@@ -164,6 +164,13 @@ export function ensembleSafetyScore(features: SafetyFeatures): {
   };
 }
 
+export function describeRouteFailure(kind: "network" | "none"): string {
+  if (kind === "network") {
+    return "The walking-route service could not be reached. This is a connection problem, not a result that no path exists. Try again in a moment.";
+  }
+  return "The route service responded, but it found no walking path between those places. Try a closer destination.";
+}
+
 export function formatWalkTime(seconds: number): string {
   const minutes = Math.max(1, Math.round(seconds / 60));
   if (minutes < 60) return `${minutes} min`;

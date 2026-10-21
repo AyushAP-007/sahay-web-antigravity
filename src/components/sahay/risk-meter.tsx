@@ -34,7 +34,7 @@ export function RiskMeter({
         />
       </div>
       <p className="text-[11px] tabular-nums text-muted-fg">
-        Score {risk.score} / 100 · rule-based, not a trained model
+        Score {risk.score} / 100 · rule total, not a probability of harm
       </p>
       {compact ? (
         <Link to="/safety" className="text-[11px] font-semibold text-primary">

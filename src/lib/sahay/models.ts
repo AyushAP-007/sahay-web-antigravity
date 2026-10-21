@@ -82,10 +82,29 @@ export interface PhoneLocation {
   message: string | null;
 }
 
+export type RiskSignalSource =
+  | "simulated_motion"
+  | "browser_gps"
+  | "journey"
+  | "clock"
+  | "simulated_device"
+  | "user";
+
+export interface RiskFactor {
+  id: string;
+  label: string;
+  detail: string;
+  points: number;
+  source: RiskSignalSource;
+  kind: "contribution" | "unavailable" | "inactive";
+}
+
 export interface RiskSnapshot {
   score: number;
   level: RiskLevel;
   reasons: string[];
+  factors?: RiskFactor[];
+  explanation?: string;
   computedAt: string;
 }
 
@@ -153,6 +172,11 @@ export interface Journey {
   delaySimulated: boolean;
   escalationFired: boolean;
   selectedRoute: PlannedRoute | null;
+  /** Foreground GPS stayed past the deviation threshold. Not the demo button. */
+  liveOffRoute: boolean;
+  locationWatchRequested: boolean;
+  deviationStreak: number;
+  locationWatchNote: string | null;
 }
 
 export interface PendingCheckIn {
@@ -176,7 +200,7 @@ export interface AppSettings {
 
 export interface SahayState {
   user: UserProfile | null;
-  savedProfile: UserProfile | null;
+  profiles: UserProfile[];
   contacts: EmergencyContact[];
   events: EmergencyEvent[];
   activity: ActivityEntry[];

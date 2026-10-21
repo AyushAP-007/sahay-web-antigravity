@@ -14,7 +14,7 @@ import type {
   RiskLevel,
   SensorSnapshot,
 } from "./models";
-import { eventLabel, simulatedAccel } from "./safety";
+import { eventLabel, simulatedAccel } from "./safety.ts";
 
 export function createLocalId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -151,6 +151,59 @@ export async function requestPhoneLocation(): Promise<PhoneLocation> {
       { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
     );
   });
+}
+
+export function watchPhoneLocation(onFix: (location: PhoneLocation) => void): () => void {
+  if (typeof navigator === "undefined" || !navigator.geolocation) {
+    onFix(
+      unavailable("unknown", "This browser does not provide location access."),
+    );
+    return () => undefined;
+  }
+  const id = navigator.geolocation.watchPosition(
+    (position) =>
+      onFix({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: Number.isFinite(position.coords.accuracy)
+          ? Math.round(position.coords.accuracy)
+          : null,
+        available: true,
+        permission: "granted",
+        updatedAt: new Date().toISOString(),
+        message: null,
+      }),
+    (error) => {
+      const denied = error.code === error.PERMISSION_DENIED;
+      const message = denied
+        ? "Location permission was not granted. Missing GPS is not treated as danger."
+        : error.code === error.TIMEOUT
+          ? "A foreground location update timed out."
+          : "Phone location is not available right now. Missing GPS is not treated as danger.";
+      onFix(unavailable(denied ? "denied" : "unknown", message));
+    },
+    { enableHighAccuracy: true, maximumAge: 4000, timeout: 20000 },
+  );
+  return () => navigator.geolocation.clearWatch(id);
+}
+
+/** Keep the last successful fix visible when a later watch update has no coordinates. */
+export function locationAfterWatchUpdate(
+  previous: PhoneLocation,
+  incoming: PhoneLocation,
+): PhoneLocation {
+  if (incoming.available && incoming.latitude !== null && incoming.longitude !== null) {
+    return incoming;
+  }
+  if (previous.latitude === null || previous.longitude === null) return incoming;
+  return {
+    ...incoming,
+    latitude: previous.latitude,
+    longitude: previous.longitude,
+    accuracy: previous.accuracy,
+    updatedAt: previous.updatedAt,
+    available: false,
+  };
 }
 
 export function simulateContactDelivery(enabledContacts: number): {

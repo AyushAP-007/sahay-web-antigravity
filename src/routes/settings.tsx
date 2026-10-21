@@ -110,6 +110,13 @@ function SettingsScreen() {
           detail="Risk score and response agent"
           to="/safety"
         />
+        <div className="ml-[47px] h-px bg-border" />
+        <SettingLink
+          icon={Cpu}
+          title="Simulation Lab"
+          detail="Repeatable scenarios · not saved to history"
+          to="/lab"
+        />
       </Panel>
 
       <SectionTitle title="Response preferences" />
@@ -273,8 +280,8 @@ function SettingsScreen() {
           <AlertDialogHeader>
             <AlertDialogTitle>Sign out?</AlertDialogTitle>
             <AlertDialogDescription>
-              Your profile, contacts, and history will remain saved on this
-              device.
+              You will leave this profile. Every profile on this device,
+              including its contacts and history, stays saved.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -321,7 +328,7 @@ function SettingLink({
   icon: ComponentType<{ className?: string }>;
   title: string;
   detail: string;
-  to: "/contacts" | "/location" | "/device" | "/journey" | "/safety";
+  to: "/contacts" | "/location" | "/device" | "/journey" | "/safety" | "/lab";
 }) {
   return (
     <Link to={to} className="flex min-h-[52px] items-center gap-2.5">

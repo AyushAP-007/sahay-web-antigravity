@@ -25,10 +25,20 @@ import {
   chooseResponse,
   CHECKIN_SECONDS_DEFAULT,
   eventTypeFromMotion,
-  isJourneyOverdue,
-  needsCheckIn,
   riskFromState,
 } from "./safety";
+import { decideResponse } from "./agent";
+import { nextDeviationObservation } from "./geo";
+import {
+  applyOkay,
+  claimEscalation,
+  escalationCommitAllowed,
+  escalationEventType,
+  incidentAction,
+  journeyIncident,
+  type EscalationFlight,
+} from "./incidents";
+import { simulatedSensorProvider } from "./sensors";
 import {
   createActivityEntry,
   createEmergencyEvent,
@@ -36,42 +46,28 @@ import {
   createLocalId,
   createLocalNotification,
   createTestActivityEntries,
-  defaultSettings,
   getEnabledContactCount,
   requestPhoneLocation,
   simulatedDeviceService,
+  watchPhoneLocation,
+  locationAfterWatchUpdate,
 } from "./services";
-import { emptyLocation, loadLocalState, migrateState, saveLocalState } from "./storage";
+import { emptyLibrary, openDemoProfile, registerProfile, renameProfile, restoreProfile, saveActiveSession, signOutProfile, viewFromLibrary, type ProfileAccess, type ProfileLibrary } from "./profiles";
+import { loadLocalState, readStoredLibrary, saveProfileLibrary } from "./storage";
 
 function freshState(): SahayState {
-  const device = simulatedDeviceService.createInitialStatus();
-  const settings = { ...defaultSettings };
-  const location = emptyLocation();
-  return {
-    user: null,
-    savedProfile: null,
-    contacts: [],
-    events: [],
-    activity: [],
-    notifications: [],
-    device,
-    location,
-    settings,
-    journey: null,
-    pendingCheckIn: null,
-    currentRisk: riskFromState({ device, location, journey: null, settings }),
-  };
+  return viewFromLibrary(emptyLibrary());
 }
 
 interface SahayContextValue {
   state: SahayState;
   ready: boolean;
   storageError: string | null;
-  signUp: (profile: Omit<UserProfile, "id">) => boolean;
-  signIn: (email: string) => boolean;
-  enterDemo: () => boolean;
+  signUp: (profile: Omit<UserProfile, "id">) => ProfileAccess;
+  signIn: (email: string) => ProfileAccess;
+  enterDemo: () => void;
   signOut: () => void;
-  updateProfile: (profile: Omit<UserProfile, "id">) => boolean;
+  updateProfile: (profile: Omit<UserProfile, "id">) => ProfileAccess;
   addContact: (contact: Omit<EmergencyContact, "id" | "userId">) => boolean;
   updateContact: (
     id: string,
@@ -100,6 +96,7 @@ interface SahayContextValue {
   simulateJourneyDelay: () => void;
   simulateJourneyOffRoute: () => void;
   endJourney: (status?: "completed" | "cancelled") => void;
+  setJourneyLocationWatch: (requested: boolean) => void;
   confirmCheckIn: (ok: boolean) => Promise<EmergencyEvent | null>;
   markNotificationsRead: () => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
@@ -120,19 +117,32 @@ function prependActivity(state: SahayState, entry: ReturnType<typeof createActiv
 export function SahayProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<SahayState>(freshState);
   const stateRef = useRef(state);
+  const libraryRef = useRef<ProfileLibrary>(emptyLibrary());
+  const escalationRef = useRef<{
+    flight: EscalationFlight;
+    promise: Promise<EmergencyEvent | null>;
+  } | null>(null);
+  const watchStopRef = useRef<(() => void) | null>(null);
   const [ready, setReady] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
+
+  const publish = useCallback((library: ProfileLibrary) => {
+    libraryRef.current = library;
+    const view = viewFromLibrary(library);
+    stateRef.current = view;
+    setState(view);
+    try {
+      saveProfileLibrary(library);
+      setStorageError(null);
+    } catch {
+      setStorageError("A change could not be saved on this device.");
+    }
+  }, []);
 
   useEffect(() => {
     try {
       const stored = loadLocalState();
-      if (stored !== null) {
-        const restored = migrateState(stored);
-        if (restored) {
-          stateRef.current = restored;
-          setState(restored);
-        }
-      }
+      publish(readStoredLibrary(stored));
       setReady(true);
     } catch (error: unknown) {
       setStorageError(
@@ -142,107 +152,60 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       );
       setReady(true);
     }
-  }, []);
+  }, [publish]);
 
-  const commit = useCallback((next: SahayState) => {
-    const scored = withRisk(next);
-    stateRef.current = scored;
-    setState(scored);
-    try {
-      saveLocalState(scored);
-      setStorageError(null);
-    } catch {
-      setStorageError("A change could not be saved on this device.");
-    }
-  }, []);
+  const commit = useCallback(
+    (next: SahayState) => {
+      const scored = withRisk(next);
+      publish(saveActiveSession(libraryRef.current, scored));
+    },
+    [publish],
+  );
 
   const signUp = useCallback(
     (profile: Omit<UserProfile, "id">) => {
-      const current = stateRef.current;
-      if (
-        current.savedProfile &&
-        current.savedProfile.email.toLowerCase() !== profile.email.toLowerCase()
-      ) {
-        return false;
-      }
-      const user: UserProfile = current.savedProfile
-        ? { ...current.savedProfile, ...profile }
-        : { id: createLocalId("user"), ...profile };
-      commit({
-        ...current,
-        user,
-        savedProfile: user,
-        device: { ...current.device, userId: user.id },
-      });
-      return true;
+      const base = stateRef.current.user
+        ? saveActiveSession(libraryRef.current, stateRef.current)
+        : libraryRef.current;
+      const result = registerProfile(base, profile, createLocalId("user"));
+      if (result.result.ok) publish(result.library);
+      return result.result;
     },
-    [commit],
+    [publish],
   );
 
-  const signIn = useCallback((email: string) => {
-    const current = stateRef.current;
-    if (
-      !current.savedProfile ||
-      current.savedProfile.email.toLowerCase() !== email.trim().toLowerCase()
-    ) {
-      return false;
-    }
-    commit({ ...current, user: current.savedProfile });
-    return true;
-  }, [commit]);
+  const signIn = useCallback(
+    (email: string) => {
+      const base = stateRef.current.user
+        ? saveActiveSession(libraryRef.current, stateRef.current)
+        : libraryRef.current;
+      const result = restoreProfile(base, email);
+      if (result.result.ok) publish(result.library);
+      return result.result;
+    },
+    [publish],
+  );
 
   const enterDemo = useCallback(() => {
-    const current = stateRef.current;
-    if (current.savedProfile) {
-      commit({ ...current, user: current.savedProfile });
-      return true;
-    }
-    const user: UserProfile = {
-      id: createLocalId("user"),
-      name: "Asha Rao",
-      email: "asha@sahay.demo",
-      phone: "+91 98765 43210",
-    };
-    const contact: EmergencyContact = {
-      id: createLocalId("contact"),
-      userId: user.id,
-      name: "Meera Rao",
-      phone: "+91 98111 22001",
-      relationship: "Sister",
-      priority: 1,
-      enabled: true,
-    };
-    commit({
-      ...current,
-      user,
-      savedProfile: user,
-      contacts: [contact],
-      settings: { ...current.settings, quietCallName: "Meera Rao" },
-      device: {
-        ...simulatedDeviceService.createInitialStatus(),
-        userId: user.id,
-        connectionStatus: "connected",
-        communicationStatus: "online",
-        gpsStatus: "available",
-        lastSeen: new Date().toISOString(),
-      },
-    });
-    return true;
-  }, [commit]);
+    const base = stateRef.current.user
+      ? saveActiveSession(libraryRef.current, stateRef.current)
+      : libraryRef.current;
+    publish(openDemoProfile(base));
+  }, [publish]);
 
   const signOut = useCallback(() => {
-    commit({ ...stateRef.current, user: null, pendingCheckIn: null });
-  }, [commit]);
+    publish(signOutProfile(libraryRef.current, stateRef.current));
+  }, [publish]);
 
   const updateProfile = useCallback(
     (profile: Omit<UserProfile, "id">) => {
       const current = stateRef.current;
-      if (!current.user) return false;
-      const updated = { ...current.user, ...profile };
-      commit({ ...current, user: updated, savedProfile: updated });
-      return true;
+      if (!current.user) return { ok: false, reason: "unknown" } as const;
+      const result = renameProfile(libraryRef.current, current.user.id, profile);
+      if (result.result.ok) publish(result.library);
+      return result.result;
     },
-    [commit],
+    [publish],
   );
 
   const addContact = useCallback(
@@ -311,8 +274,10 @@ export function SahayProvider({ children }: { children: ReactNode }) {
   );
 
   const requestLocation = useCallback(async () => {
+    const ownerId = stateRef.current.user?.id ?? null;
     const location = await requestPhoneLocation();
     const current = stateRef.current;
+    if ((current.user?.id ?? null) !== ownerId) return location;
     commit({
       ...current,
       location,
@@ -340,13 +305,29 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       motionPattern: MotionPattern | null;
       journeyId: string | null;
       forceNotify?: boolean;
-    }): Promise<EmergencyEvent> => {
+      flight?: EscalationFlight;
+      requireActiveJourney?: boolean;
+    }): Promise<EmergencyEvent | null> => {
       const current = stateRef.current;
-      if (!current.user) throw new Error("Sign in before recording an event.");
+      const ownerId = current.user?.id;
+      if (!ownerId) throw new Error("Sign in before recording an event.");
       const location = await requestPhoneLocation();
       const refreshed = stateRef.current;
       const user = refreshed.user;
-      if (!user) throw new Error("Sign in before recording an event.");
+      if (!user || user.id !== ownerId) {
+        throw new Error("Sign in before recording an event.");
+      }
+      if (input.flight && !escalationCommitAllowed(input.flight, refreshed)) {
+        return null;
+      }
+      if (
+        input.requireActiveJourney &&
+        (!refreshed.journey ||
+          refreshed.journey.id !== input.journeyId ||
+          refreshed.journey.status !== "active")
+      ) {
+        return null;
+      }
       const enabledContacts = getEnabledContactCount(refreshed.contacts, user.id);
       const risk = riskFromState({ ...refreshed, location });
       const responseAction = input.forceNotify
@@ -373,9 +354,16 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       });
       const notes = createEventNotification(user.id, event);
       const activity = createTestActivityEntries(user.id, event);
+      const journey =
+        refreshed.journey &&
+        input.journeyId &&
+        refreshed.journey.id === input.journeyId
+          ? { ...refreshed.journey, escalationFired: true }
+          : refreshed.journey;
       commit({
         ...refreshed,
         location,
+        journey,
         events: [event, ...refreshed.events],
         notifications: [notes, ...refreshed.notifications].slice(0, 80),
         activity: refreshed.settings.activityEnabled
@@ -388,14 +376,42 @@ export function SahayProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  const escalatePending = useCallback(
+    (pending: PendingCheckIn) => {
+      const ownerId = stateRef.current.user?.id;
+      if (!ownerId) return Promise.resolve(null);
+      const existing = escalationRef.current;
+      if (existing?.flight.pendingId === pending.id) return existing.promise;
+      const claim = claimEscalation(existing?.flight ?? null, pending, ownerId);
+      if (!claim.started) return existing?.promise ?? Promise.resolve(null);
+      const promise = recordEvent({
+        type: escalationEventType(pending),
+        confirmed: false,
+        motionPattern: pending.motionPattern,
+        journeyId: pending.journeyId,
+        forceNotify: true,
+        flight: claim.flight,
+      }).finally(() => {
+        if (escalationRef.current?.flight.pendingId === pending.id) {
+          escalationRef.current = null;
+        }
+      });
+      escalationRef.current = { flight: claim.flight, promise };
+      return promise;
+    },
+    [recordEvent],
+  );
+
   const runTestSOS = useCallback(async () => {
-    return recordEvent({
+    const event = await recordEvent({
       type: "TEST",
       confirmed: true,
       motionPattern: null,
       journeyId: stateRef.current.journey?.id ?? null,
       forceNotify: true,
     });
+    if (!event) throw new Error("TEST SOS could not be recorded.");
+    return event;
   }, [recordEvent]);
 
   const addDeviceActivity = useCallback((title: string, detail: string) => {
@@ -477,51 +493,62 @@ export function SahayProvider({ children }: { children: ReactNode }) {
   const simulateMotion = useCallback(
     (pattern: MotionPattern) => {
       const current = stateRef.current;
-      const device = simulatedDeviceService.setMotion(current.device, pattern);
-      const next = withRisk({ ...current, device });
-      const highMotion =
-        pattern === "fall" ||
-        pattern === "impact" ||
-        pattern === "struggle" ||
-        pattern === "sudden_stop";
-      const shouldPrompt =
-        current.settings.confirmBeforeEscalate &&
-        needsCheckIn(next.currentRisk.level) &&
-        highMotion;
-      const shouldAutoEscalate =
-        !current.settings.confirmBeforeEscalate &&
-        needsCheckIn(next.currentRisk.level) &&
-        highMotion;
-      const pending: PendingCheckIn | null = shouldPrompt
+      const reading = simulatedSensorProvider.read(pattern);
+      const device = reading
         ? {
-            id: createLocalId("checkin"),
-            reason: `Simulated ${pattern.replace("_", " ")} motion from the demo locket.`,
-            motionPattern: pattern,
-            risk: next.currentRisk,
-            eventType: eventTypeFromMotion(pattern),
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(
-              Date.now() + (current.settings.checkInSeconds || CHECKIN_SECONDS_DEFAULT) * 1000,
-            ).toISOString(),
-            journeyId: current.journey?.id ?? null,
+            ...current.device,
+            lastSeen: reading.sampledAt,
+            sensor: {
+              motionPattern: reading.motionPattern,
+              accelMagnitude: reading.accelMagnitude,
+              orientation: reading.orientation,
+              sampledAt: reading.sampledAt,
+              simulated: true as const,
+            },
           }
-        : current.pendingCheckIn;
+        : simulatedDeviceService.setMotion(current.device, pattern);
+      const next = withRisk({ ...current, device });
+      const decision = incidentAction(
+        next.currentRisk.level,
+        current.settings.confirmBeforeEscalate,
+      );
+      const agent = decideResponse({
+        risk: next.currentRisk,
+        confirmBeforeEscalate: current.settings.confirmBeforeEscalate,
+      });
+      const pending: PendingCheckIn | null =
+        decision === "prompt"
+          ? {
+              id: createLocalId("checkin"),
+              reason: agent.reason,
+              motionPattern: pattern,
+              risk: next.currentRisk,
+              eventType: eventTypeFromMotion(pattern),
+              createdAt: new Date().toISOString(),
+              expiresAt: new Date(
+                Date.now() + (current.settings.checkInSeconds || CHECKIN_SECONDS_DEFAULT) * 1000,
+              ).toISOString(),
+              journeyId: current.journey?.status === "active" ? current.journey.id : null,
+            }
+          : decision === "notify"
+            ? null
+            : current.pendingCheckIn;
       commit({
         ...next,
         pendingCheckIn: pending,
         activity: addDeviceActivity(
-          `Motion set to ${pattern.replace("_", " ")} (simulated)`,
+          `Motion set to ${pattern.replaceAll("_", " ")} (simulated)`,
           "MPU6050 is not connected. This is a demonstration pattern for the risk rules.",
         ),
       });
-      if (shouldAutoEscalate && current.user) {
+      if (decision === "notify" && current.user) {
         void recordEvent({
           type: eventTypeFromMotion(pattern),
           confirmed: false,
           motionPattern: pattern,
-          journeyId: current.journey?.id ?? null,
+          journeyId: current.journey?.status === "active" ? current.journey.id : null,
           forceNotify: true,
-        });
+        }).catch(() => undefined);
       }
       return pending;
     },
@@ -541,11 +568,14 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       selectedRoute?: Journey["selectedRoute"];
     }) => {
       const current = stateRef.current;
-      if (!current.user) throw new Error("Sign in before starting a journey.");
+      const ownerId = current.user?.id;
+      if (!ownerId) throw new Error("Sign in before starting a journey.");
       const location = await requestPhoneLocation();
       const refreshed = stateRef.current;
       const user = refreshed.user;
-      if (!user) throw new Error("Sign in before starting a journey.");
+      if (!user || user.id !== ownerId) {
+        throw new Error("Sign in before starting a journey.");
+      }
       const startedAt = new Date();
       const originLat = input.originLat ?? location.latitude;
       const originLng = input.originLng ?? location.longitude;
@@ -572,6 +602,12 @@ export function SahayProvider({ children }: { children: ReactNode }) {
         delaySimulated: false,
         escalationFired: false,
         selectedRoute: input.selectedRoute ?? null,
+        liveOffRoute: false,
+        locationWatchRequested: false,
+        deviationStreak: 0,
+        locationWatchNote: input.selectedRoute
+          ? "Location watching is off until you turn it on. Background tracking is not available."
+          : "This journey has no walking line, so GPS deviation will not be judged.",
       };
       commit({
         ...refreshed,
@@ -604,21 +640,15 @@ export function SahayProvider({ children }: { children: ReactNode }) {
   const checkInJourney = useCallback(() => {
     const current = stateRef.current;
     if (!current.user || !current.journey || current.journey.status !== "active") return;
+    const resolved = applyOkay(current);
     commit({
-      ...current,
-      journey: {
-        ...current.journey,
-        lastCheckInAt: new Date().toISOString(),
-        lastKnownLat: current.location.latitude,
-        lastKnownLng: current.location.longitude,
-      },
-      pendingCheckIn: null,
+      ...resolved,
       activity: prependActivity(
         current,
         createActivityEntry(
           current.user.id,
           "Journey check-in",
-          "You confirmed you are okay. No contacts were notified.",
+          "You confirmed you are okay. The current warning was cleared, and no contacts were notified.",
           "checkin",
         ),
       ),
@@ -651,15 +681,61 @@ export function SahayProvider({ children }: { children: ReactNode }) {
   const simulateJourneyOffRoute = useCallback(() => {
     const current = stateRef.current;
     if (!current.user || !current.journey || current.journey.status !== "active") return;
+    const projectedJourney = { ...current.journey, offRouteSimulated: true };
+    const projected = riskFromState({ ...current, journey: projectedJourney });
+    const decision = incidentAction(
+      projected.level,
+      current.settings.confirmBeforeEscalate,
+    );
+    if (decision === "notify") {
+      commit({
+        ...current,
+        journey: { ...projectedJourney, escalationFired: true },
+        pendingCheckIn: null,
+        currentRisk: projected,
+        activity: prependActivity(
+          current,
+          createActivityEntry(
+            current.user.id,
+            "Off-route simulated",
+            "Confirmation is off for this score, so a simulated alert was recorded. No map-matching is running.",
+            "journey",
+          ),
+        ),
+      });
+      void recordEvent({
+        type: "JOURNEY_DEVIATION",
+        confirmed: false,
+        motionPattern: current.device.sensor.motionPattern,
+        journeyId: current.journey.id,
+        forceNotify: true,
+        requireActiveJourney: true,
+      }).catch(() => undefined);
+      return;
+    }
+    if (decision === "observe") {
+      commit({
+        ...current,
+        journey: projectedJourney,
+        currentRisk: projected,
+        activity: prependActivity(
+          current,
+          createActivityEntry(
+            current.user.id,
+            "Off-route simulated",
+            "The score stayed in the observe band, so Sahay did not ask or send a simulated alert.",
+            "journey",
+          ),
+        ),
+      });
+      return;
+    }
     const seconds = current.settings.checkInSeconds || CHECKIN_SECONDS_DEFAULT;
     const pending: PendingCheckIn = {
       id: createLocalId("checkin"),
-      reason: "This demo marked the journey as off the expected route.",
+      reason: `This demo marked the journey as off the expected route. ${decideResponse({ risk: projected, confirmBeforeEscalate: current.settings.confirmBeforeEscalate }).reason}`,
       motionPattern: current.device.sensor.motionPattern,
-      risk: riskFromState({
-        ...current,
-        journey: { ...current.journey, offRouteSimulated: true },
-      }),
+      risk: projected,
       eventType: "JOURNEY_DEVIATION",
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + seconds * 1000).toISOString(),
@@ -667,19 +743,20 @@ export function SahayProvider({ children }: { children: ReactNode }) {
     };
     commit({
       ...current,
-      journey: { ...current.journey, offRouteSimulated: true },
+      journey: projectedJourney,
       pendingCheckIn: pending,
+      currentRisk: projected,
       activity: prependActivity(
         current,
         createActivityEntry(
           current.user.id,
           "Off-route simulated",
-          "No map-matching is running. This flag is for the project demonstration.",
+          "No map-matching is running. This flag asks if you are okay.",
           "journey",
         ),
       ),
     });
-  }, [commit]);
+  }, [commit, recordEvent]);
 
   const endJourney = useCallback(
     (status: "completed" | "cancelled" = "completed") => {
@@ -687,7 +764,12 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       if (!current.user || !current.journey) return;
       commit({
         ...current,
-        journey: { ...current.journey, status },
+        journey: {
+          ...current.journey,
+          status,
+          locationWatchRequested: false,
+          locationWatchNote: "Location watching stopped.",
+        },
         pendingCheckIn:
           current.pendingCheckIn?.journeyId === current.journey.id
             ? null
@@ -706,40 +788,45 @@ export function SahayProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  const setJourneyLocationWatch = useCallback((requested: boolean) => {
+    const current = stateRef.current;
+    if (!current.user || !current.journey || current.journey.status !== "active") return;
+    commit({
+      ...current,
+      journey: {
+        ...current.journey,
+        locationWatchRequested: requested,
+        locationWatchNote: requested
+          ? "Foreground updates requested. Watching stops when the journey ends, you turn it off, or you sign out. Background tracking is not available."
+          : "Location watching is off.",
+      },
+    });
+  }, [commit]);
+
   const confirmCheckIn = useCallback(
     async (ok: boolean) => {
       const current = stateRef.current;
       const pending = current.pendingCheckIn;
       if (!current.user || !pending) return null;
       if (ok) {
+        const resolved = applyOkay(current);
         commit({
-          ...current,
-          pendingCheckIn: null,
-          device: simulatedDeviceService.setMotion(current.device, "idle"),
-          journey: current.journey
-            ? { ...current.journey, lastCheckInAt: new Date().toISOString() }
-            : current.journey,
+          ...resolved,
           activity: prependActivity(
             current,
             createActivityEntry(
               current.user.id,
               "You confirmed you are okay",
-              "The prototype did not notify contacts. Simulated motion returned to idle.",
+              "The warning was cleared and the risk score was recalculated. Contacts were not notified.",
               "checkin",
             ),
           ),
         });
         return null;
       }
-      return recordEvent({
-        type: pending.eventType,
-        confirmed: false,
-        motionPattern: pending.motionPattern,
-        journeyId: pending.journeyId,
-        forceNotify: true,
-      });
+      return escalatePending(pending);
     },
-    [commit, recordEvent],
+    [commit, escalatePending],
   );
 
   const markNotificationsRead = useCallback(() => {
@@ -781,67 +868,175 @@ export function SahayProvider({ children }: { children: ReactNode }) {
         if (handlingExpiry.current) return;
         handlingExpiry.current = true;
         const pending = current.pendingCheckIn;
-        void recordEvent({
-          type:
-            pending.eventType === "JOURNEY_DEVIATION"
-              ? "JOURNEY_DEVIATION"
-              : pending.journeyId
-                ? "JOURNEY_TIMEOUT"
-                : "CHECKIN_TIMEOUT",
-          confirmed: false,
-          motionPattern: pending.motionPattern,
-          journeyId: pending.journeyId,
-          forceNotify: true,
-        }).finally(() => {
-          handlingExpiry.current = false;
-        });
+        void escalatePending(pending)
+          .catch(() => null)
+          .finally(() => {
+            handlingExpiry.current = false;
+          });
         return;
       }
 
-      let next = current;
-      let changed = false;
-
-      if (
-        current.journey &&
-        current.journey.status === "active" &&
-        !current.journey.escalationFired &&
-        !current.pendingCheckIn &&
-        (isJourneyOverdue(current.journey) || current.journey.delaySimulated)
-      ) {
+      const incident = journeyIncident(current);
+      if (incident === "notify" && current.journey) {
+        const journey = {
+          ...current.journey,
+          delaySimulated: true,
+          escalationFired: true,
+        };
+        commit({ ...current, journey, pendingCheckIn: null });
+        void recordEvent({
+          type: "JOURNEY_TIMEOUT",
+          confirmed: false,
+          motionPattern: current.device.sensor.motionPattern,
+          journeyId: current.journey.id,
+          forceNotify: true,
+          requireActiveJourney: true,
+        }).catch(() => undefined);
+        return;
+      }
+      if (incident === "prompt" && current.journey) {
         const seconds = current.settings.checkInSeconds || CHECKIN_SECONDS_DEFAULT;
-        next = {
+        const journey = {
+          ...current.journey,
+          delaySimulated: true,
+          escalationFired: true,
+        };
+        const risk = riskFromState({ ...current, journey });
+        commit({
           ...current,
-          journey: { ...current.journey, escalationFired: true, delaySimulated: true },
+          journey,
           pendingCheckIn: {
             id: createLocalId("checkin"),
-            reason: "This journey is past the expected arrival time.",
+            reason: `This journey is past the expected arrival time. ${decideResponse({ risk, confirmBeforeEscalate: current.settings.confirmBeforeEscalate }).reason}`,
             motionPattern: current.device.sensor.motionPattern,
-            risk: riskFromState({
-              ...current,
-              journey: { ...current.journey, delaySimulated: true },
-            }),
+            risk,
             eventType: "JOURNEY_TIMEOUT",
             createdAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + seconds * 1000).toISOString(),
             journeyId: current.journey.id,
           },
-        };
-        changed = true;
+        });
+        return;
       }
 
-      const scored = riskFromState(next);
+      const scored = riskFromState(current);
       if (
-        scored.score !== next.currentRisk.score ||
-        scored.level !== next.currentRisk.level
+        scored.score !== current.currentRisk.score ||
+        scored.level !== current.currentRisk.level
       ) {
-        next = { ...next, currentRisk: scored };
-        changed = true;
+        commit({ ...current, currentRisk: scored });
       }
-      if (changed) commit(next);
     };
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [commit, ready, recordEvent]);
+  }, [commit, escalatePending, ready, recordEvent]);
+
+  useEffect(() => {
+    watchStopRef.current?.();
+    watchStopRef.current = null;
+    if (!ready || !state.user) return;
+    const active = stateRef.current.journey;
+    if (!active || active.status !== "active" || !active.locationWatchRequested) return;
+    const stop = watchPhoneLocation((location) => {
+      const current = stateRef.current;
+      const journey = current.journey;
+      if (
+        !current.user ||
+        !journey ||
+        journey.status !== "active" ||
+        !journey.locationWatchRequested
+      ) {
+        return;
+      }
+      const observation = nextDeviationObservation({
+        previousStreak: journey.deviationStreak ?? 0,
+        previouslyOffRoute: journey.liveOffRoute ?? false,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy,
+        geometry: journey.selectedRoute?.geometry ?? null,
+      });
+      const note =
+        !location.available && location.message ? location.message : observation.note;
+      const phone = { ...locationAfterWatchUpdate(current.location, location), message: note };
+      const nextJourney: Journey = {
+        ...journey,
+        deviationStreak: observation.streak,
+        liveOffRoute: observation.liveOffRoute,
+        locationWatchNote: note,
+        lastKnownLat: location.latitude ?? journey.lastKnownLat,
+        lastKnownLng: location.longitude ?? journey.lastKnownLng,
+      };
+      const becameOffRoute = observation.liveOffRoute && !journey.liveOffRoute;
+      if (becameOffRoute && !current.pendingCheckIn) {
+        const projected = riskFromState({
+          ...current,
+          journey: nextJourney,
+          location,
+        });
+        const decision = incidentAction(
+          projected.level,
+          current.settings.confirmBeforeEscalate,
+        );
+        if (decision === "notify") {
+          commit({
+            ...current,
+            location: phone,
+            journey: { ...nextJourney, escalationFired: true },
+            pendingCheckIn: null,
+            currentRisk: projected,
+          });
+          void recordEvent({
+            type: "JOURNEY_DEVIATION",
+            confirmed: false,
+            motionPattern: current.device.sensor.motionPattern,
+            journeyId: journey.id,
+            forceNotify: true,
+            requireActiveJourney: true,
+          }).catch(() => undefined);
+          return;
+        }
+        if (decision === "prompt") {
+          const seconds = current.settings.checkInSeconds || CHECKIN_SECONDS_DEFAULT;
+          commit({
+            ...current,
+            location: phone,
+            journey: nextJourney,
+            currentRisk: projected,
+            pendingCheckIn: {
+              id: createLocalId("checkin"),
+              reason: observation.note,
+              motionPattern: current.device.sensor.motionPattern,
+              risk: projected,
+              eventType: "JOURNEY_DEVIATION",
+              createdAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + seconds * 1000).toISOString(),
+              journeyId: journey.id,
+            },
+          });
+          return;
+        }
+      }
+      commit({
+        ...current,
+        location: phone,
+        journey: nextJourney,
+      });
+    });
+    watchStopRef.current = stop;
+    return () => {
+      stop();
+      if (watchStopRef.current === stop) watchStopRef.current = null;
+    };
+  }, [
+    commit,
+    ready,
+    recordEvent,
+    state.journey?.id,
+    state.journey?.locationWatchRequested,
+    state.journey?.status,
+    state.user?.id,
+  ]);
 
   const value = useMemo<SahayContextValue>(
     () => ({
@@ -868,6 +1063,7 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       simulateJourneyDelay,
       simulateJourneyOffRoute,
       endJourney,
+      setJourneyLocationWatch,
       confirmCheckIn,
       markNotificationsRead,
       updateSettings,
@@ -897,6 +1093,7 @@ export function SahayProvider({ children }: { children: ReactNode }) {
       simulateJourneyDelay,
       simulateJourneyOffRoute,
       endJourney,
+      setJourneyLocationWatch,
       confirmCheckIn,
       markNotificationsRead,
       updateSettings,

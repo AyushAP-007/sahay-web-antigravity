@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Cpu, Info, Shield } from "lucide-react";
 import { RequireUser } from "@/components/sahay/guard";
+import { RiskExplanation } from "@/components/sahay/risk-explanation";
 import { RiskMeter } from "@/components/sahay/risk-meter";
 import { SahayShell } from "@/components/sahay/shell";
 import { HelperText, Panel, SectionTitle } from "@/components/sahay/ui";
@@ -45,6 +46,11 @@ function SafetyScreen() {
         <RiskMeter risk={state.currentRisk} />
       </Panel>
 
+      <Panel className="gap-3">
+        <SectionTitle title="Why this score" />
+        <RiskExplanation risk={state.currentRisk} />
+      </Panel>
+
       <Panel className="gap-2">
         <SectionTitle title="Current inputs" />
         <Row label="Motion (simulated)" value={motionLabel(state.device.sensor.motionPattern)} />
@@ -78,9 +84,14 @@ function SafetyScreen() {
         />
         <p className="text-sm font-semibold text-fg">{responseLabel(action)}</p>
         <HelperText>
-          Low observes. Medium asks if you are okay. High prepares a simulated
-          alert after the confirmation window. Critical or TEST SOS records a
-          simulated contact notification immediately.
+          Low only watches. Medium, from simulated motion or a late journey,
+          asks if you are okay. High asks first when “Confirm before escalate”
+          is on, and records a simulated alert immediately when it is off.
+          Critical and TEST SOS record that alert immediately. If a check-in
+          window runs out, the alert keeps the original incident type — a
+          suspected fall stays a fall. Saying you are okay clears that warning,
+          recalculates the score, and does not ask about the same late journey
+          again for at least a minute.
         </HelperText>
         <div className="flex items-start gap-2.5 rounded-[13px] bg-muted p-3">
           <Cpu className="mt-0.5 size-4 shrink-0 text-primary" />
@@ -99,6 +110,12 @@ function SafetyScreen() {
         <Row label="75–100" value="Critical · simulate notify" />
       </Panel>
 
+      <Button asChild variant="secondary">
+        <Link to="/lab">
+          <Cpu className="size-4" />
+          Open simulation lab
+        </Link>
+      </Button>
       <Button asChild variant="secondary">
         <Link to="/device">
           <Shield className="size-4" />

@@ -4,6 +4,7 @@ import type {
   Journey,
   MotionPattern,
   ResponseAction,
+  RiskFactor,
   RiskLevel,
   RiskSnapshot,
   SahayState,
@@ -35,6 +36,34 @@ export function eventTypeFromMotion(pattern: MotionPattern): EventType {
   return "CHECKIN_TIMEOUT";
 }
 
+export function signalSourceLabel(source: RiskFactor["source"]): string {
+  switch (source) {
+    case "simulated_motion":
+      return "simulated motion";
+    case "browser_gps":
+      return "browser GPS";
+    case "journey":
+      return "the journey";
+    case "clock":
+      return "the clock";
+    case "simulated_device":
+      return "the simulated locket";
+    case "user":
+      return "your confirmation";
+  }
+}
+
+function factor(
+  id: string,
+  label: string,
+  detail: string,
+  points: number,
+  source: RiskFactor["source"],
+  kind: RiskFactor["kind"],
+): RiskFactor {
+  return { id, label, detail, points, source, kind };
+}
+
 export function computeRisk(input: {
   motion: MotionPattern;
   hour: number;
@@ -43,53 +72,232 @@ export function computeRisk(input: {
   nightRiskBoost: boolean;
   lowBattery: boolean;
   userConfirmedOk?: boolean;
+  now?: number;
 }): RiskSnapshot {
-  const reasons: string[] = [];
-  let score = MOTION_BASE[input.motion];
-  reasons.push(`Motion pattern: ${motionLabel(input.motion)} (+${MOTION_BASE[input.motion]})`);
+  const factors: RiskFactor[] = [];
+  const motionPoints = MOTION_BASE[input.motion];
+  factors.push(
+    factor(
+      "motion",
+      `Simulated motion: ${motionLabel(input.motion)}`,
+      "This pattern comes from the demonstration controls or the Simulation Lab. It is not a reading from a physical locket.",
+      motionPoints,
+      "simulated_motion",
+      "contribution",
+    ),
+  );
 
   const night = input.hour >= 22 || input.hour < 5;
   if (input.nightRiskBoost && night) {
-    score += 12;
-    reasons.push("Night hours (22:00–05:00) (+12)");
+    factors.push(
+      factor(
+        "night",
+        "Night hours",
+        "The Safety Rules night boost is on, and the clock is between 22:00 and 05:00.",
+        12,
+        "clock",
+        "contribution",
+      ),
+    );
+  } else {
+    factors.push(
+      factor(
+        "night",
+        "Night hours",
+        input.nightRiskBoost
+          ? "The night boost is on, but it is not between 22:00 and 05:00, so nothing is added."
+          : "The night boost is turned off in Safety Rules, so the hour is not added.",
+        0,
+        "clock",
+        "inactive",
+      ),
+    );
   }
 
   if (!input.locationAvailable) {
-    score += 8;
-    reasons.push("Phone location unavailable (+8)");
+    factors.push(
+      factor(
+        "gps",
+        "Browser location unavailable",
+        "No phone coordinates are available. That is missing data, not evidence that anyone is in danger. The rules add 8 only as uncertainty.",
+        8,
+        "browser_gps",
+        "unavailable",
+      ),
+    );
+  } else {
+    factors.push(
+      factor(
+        "gps",
+        "Browser location available",
+        "A phone fix is available, so the uncertainty amount is not added.",
+        0,
+        "browser_gps",
+        "inactive",
+      ),
+    );
   }
 
   if (input.lowBattery) {
-    score += 4;
-    reasons.push("Demo locket battery is low (+4)");
+    factors.push(
+      factor(
+        "battery",
+        "Simulated locket battery is low",
+        "The demonstration battery control is at or below 20%. This is not a reading from a physical device.",
+        4,
+        "simulated_device",
+        "contribution",
+      ),
+    );
+  } else {
+    factors.push(
+      factor(
+        "battery",
+        "Simulated battery",
+        "The demonstration battery is above 20%, so nothing is added.",
+        0,
+        "simulated_device",
+        "inactive",
+      ),
+    );
   }
 
-  if (input.journey && input.journey.status === "active") {
+  const journey = input.journey;
+  const active = journey?.status === "active";
+  if (!active || !journey) {
+    factors.push(
+      factor(
+        "journey",
+        "No active journey",
+        "Route, delay, and off-route amounts apply only while a journey is being watched.",
+        0,
+        "journey",
+        "inactive",
+      ),
+    );
+  } else {
     if (input.motion === "running") {
-      score += 8;
-      reasons.push("Running during an active journey (+8)");
+      factors.push(
+        factor(
+          "running",
+          "Running during the journey",
+          "Simulated running while a journey is active.",
+          8,
+          "simulated_motion",
+          "contribution",
+        ),
+      );
+    } else {
+      factors.push(
+        factor(
+          "running",
+          "Running during the journey",
+          "The simulated motion is not running, so this amount is not added.",
+          0,
+          "simulated_motion",
+          "inactive",
+        ),
+      );
     }
-    if (input.journey.offRouteSimulated) {
-      score += 16;
-      reasons.push("Journey marked off-route in this demo (+16)");
+    if (journey.offRouteSimulated || journey.liveOffRoute) {
+      const fromGps = Boolean(journey.liveOffRoute) && !journey.offRouteSimulated;
+      factors.push(
+        factor(
+          "off-route",
+          fromGps ? "Phone GPS is away from the chosen line" : "Off-route flag",
+          fromGps
+            ? "Foreground GPS passed the distance check more than once. This is not proof of harm."
+            : "The demonstration off-route control is on. It does not use live map-matching.",
+          16,
+          fromGps ? "browser_gps" : "journey",
+          "contribution",
+        ),
+      );
+    } else {
+      factors.push(
+        factor(
+          "off-route",
+          "On the chosen route",
+          "Neither the demonstration flag nor the GPS deviation check is off-route.",
+          0,
+          "journey",
+          "inactive",
+        ),
+      );
     }
-    if (input.journey.delaySimulated || isJourneyOverdue(input.journey)) {
-      score += 18;
-      reasons.push("Journey later than expected (+18)");
+    const now = input.now ?? Date.now();
+    if (journey.delaySimulated || isJourneyOverdue(journey, now)) {
+      factors.push(
+        factor(
+          "late",
+          "Journey later than expected",
+          journey.delaySimulated
+            ? "The delay demonstration is on, or the expected arrival time has passed."
+            : "The expected arrival time has passed.",
+          18,
+          "journey",
+          "contribution",
+        ),
+      );
+    } else {
+      factors.push(
+        factor(
+          "late",
+          "Journey timing",
+          "The journey is still inside the expected arrival time.",
+          0,
+          "journey",
+          "inactive",
+        ),
+      );
     }
   }
 
+  let score = factors.reduce((sum, item) => sum + item.points, 0);
   if (input.userConfirmedOk) {
-    score = Math.min(score, 22);
-    reasons.push("User confirmed they are okay (capped)");
+    const capped = Math.min(score, 22);
+    factors.push(
+      factor(
+        "confirmed",
+        "You confirmed you are okay",
+        capped < score
+          ? "The rules cap the total at 22 after you confirm you are okay."
+          : "You confirmed you are okay. The total was already under the cap, so the cap changes nothing.",
+        capped - score,
+        "user",
+        capped < score ? "contribution" : "inactive",
+      ),
+    );
+    score = capped;
   }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
+  const level = riskLevelFromScore(score);
+  const reasons = factors
+    .filter((item) => item.points !== 0)
+    .map((item) => `${item.label} (${item.points > 0 ? "+" : ""}${item.points})`);
+  const added = factors
+    .filter((item) => item.points > 0)
+    .sort((a, b) => b.points - a.points);
+  const missing = factors.filter((item) => item.kind === "unavailable");
+  const lead = added[0];
+  const explanation = [
+    `The score is ${score} out of 100, in the ${level} band. This is a rule total, not a ${score}% chance of harm.`,
+    lead
+      ? `The largest amount is ${lead.label.toLowerCase()} (+${lead.points}), from ${signalSourceLabel(lead.source)}.`
+      : "No positive amounts were added.",
+    missing.length > 0 ? missing.map((item) => item.detail).join(" ") : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return {
     score,
-    level: riskLevelFromScore(score),
+    level,
     reasons,
-    computedAt: new Date().toISOString(),
+    factors,
+    explanation,
+    computedAt: new Date(input.now ?? Date.now()).toISOString(),
   };
 }
 
@@ -104,22 +312,33 @@ export function isJourneyOverdue(journey: Journey, now = Date.now()): boolean {
   return now >= new Date(journey.expectedEndAt).getTime();
 }
 
-export function journeyRemainingMs(journey: Journey, now = Date.now()): number {
-  return new Date(journey.expectedEndAt).getTime() - now;
+export function countdownLabel(expectedEndAt: string, now: number): string {
+  const ms = new Date(expectedEndAt).getTime() - now;
+  if (!Number.isFinite(ms)) return "Time unavailable";
+  if (ms <= 0) return "Past expected arrival";
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)} remaining`;
+  return `${minutes}:${pad(seconds)} remaining`;
 }
 
 export function riskFromState(
   state: Pick<SahayState, "device" | "location" | "journey" | "settings">,
-  extras?: { userConfirmedOk?: boolean },
+  extras?: { userConfirmedOk?: boolean; hour?: number; now?: number },
 ): RiskSnapshot {
+  const now = extras?.now ?? Date.now();
   return computeRisk({
     motion: state.device.sensor.motionPattern,
-    hour: new Date().getHours(),
+    hour: extras?.hour ?? new Date(now).getHours(),
     locationAvailable: state.location.available,
     journey: state.journey,
     nightRiskBoost: state.settings.nightRiskBoost,
     lowBattery: state.device.battery <= 20,
     userConfirmedOk: extras?.userConfirmedOk,
+    now,
   });
 }
 

@@ -22,6 +22,7 @@ import { HelperText, Panel, SectionTitle, StatusIcon } from "@/components/sahay/
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useSahay } from "@/lib/sahay/context";
+import { locketSensorProvider } from "@/lib/sahay/sensors";
 import type { MotionPattern } from "@/lib/sahay/models";
 import { motionLabel } from "@/lib/sahay/safety";
 import { formatSahayDate } from "@/lib/sahay/services";
@@ -230,9 +231,16 @@ function DeviceScreen() {
         <HelperText>
           Phone location on the Location screen is real browser location when
           permission is granted. It is separate from these simulated locket
-          values.
+          values. {locketSensorProvider.describe()}
         </HelperText>
       </Panel>
+      <Link
+        to="/lab"
+        className="flex items-center justify-center gap-1 self-center py-1.5 text-xs font-semibold text-primary"
+      >
+        Open simulation lab
+        <ArrowUpRight className="size-3.5" />
+      </Link>
       <Link
         to="/safety"
         className="flex items-center justify-center gap-1 self-center py-1.5 text-xs font-semibold text-primary"

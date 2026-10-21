@@ -52,6 +52,16 @@ function LocationScreen() {
       tabbed={false}
       backTo="/"
     >
+      <Panel className="flex-row items-start gap-2.5">
+        <Info className="mt-0.5 size-4 shrink-0 text-info" />
+        <HelperText>
+          Live phone location is this browser’s GPS, only while the page is
+          open or a journey watch is on. Simulated locket GPS on the device
+          screen is a separate demonstration control. Unavailable means no
+          coordinates arrived — that is missing data, not proof of danger.
+          Background tracking is not available.
+        </HelperText>
+      </Panel>
       <Panel className="gap-4">
         <div className="flex items-center gap-2.5">
           <StatusIcon className="size-[43px] rounded-[14px] bg-info-soft text-info">
