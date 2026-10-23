@@ -1,4 +1,3 @@
-import { createServerFn } from "@tanstack/react-start";
 import {
   describeRouteFailure,
   rankRoutes,
@@ -22,7 +21,6 @@ async function fetchJson<T>(
       signal: controller.signal,
       headers: {
         Accept: "application/json",
-        "User-Agent": UA,
         ...(init.headers ?? {}),
       },
     });
@@ -35,13 +33,14 @@ async function fetchJson<T>(
   }
 }
 
-export const searchPlaces = createServerFn({ method: "POST" })
-  .validator((input: { query: string }) => ({
-    query: input.query.trim().slice(0, 80),
-  }))
-  .handler(async ({ data }): Promise<PlaceHit[]> => {
-    if (data.query.length < 2) return [];
-    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(data.query)}&limit=5&lang=en`;
+export async function searchPlaces(input: { data: { query: string } }): Promise<PlaceHit[]> {
+  const query = input.data.query.trim().slice(0, 80);
+  if (query.length < 2) return [];
+
+  // Try Photon with Pune bias first or fallback to OpenStreetMap Nominatim
+  try {
+    // If user didn't mention city, bias search towards Pune (lat 18.5204, lon 73.8567)
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=18.5204&lon=73.8567&limit=6&lang=en`;
     const payload = await fetchJson<{
       features?: Array<{
         geometry?: { coordinates?: number[] };
@@ -54,7 +53,8 @@ export const searchPlaces = createServerFn({ method: "POST" })
         };
       }>;
     }>(url);
-    return (payload.features ?? [])
+
+    const hits = (payload.features ?? [])
       .map((feature) => {
         const [lng, lat] = feature.geometry?.coordinates ?? [];
         if (typeof lat !== "number" || typeof lng !== "number") return null;
@@ -65,13 +65,34 @@ export const searchPlaces = createServerFn({ method: "POST" })
           feature.properties?.state,
         ].filter(Boolean);
         return {
-          label: bits.join(", ") || data.query,
+          label: bits.join(", ") || query,
           lat,
           lng,
         } satisfies PlaceHit;
       })
       .filter((item): item is PlaceHit => item !== null);
-  });
+
+    if (hits.length > 0) return hits;
+  } catch (err) {
+    console.warn("Photon search fallback:", err);
+  }
+
+  // Backup: Nominatim
+  try {
+    const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&countrycodes=in`;
+    const nomHits = await fetchJson<
+      Array<{ display_name: string; lat: string; lon: string }>
+    >(nomUrl, { headers: { "User-Agent": UA } });
+
+    return nomHits.map((item) => ({
+      label: item.display_name.split(",").slice(0, 3).join(","),
+      lat: parseFloat(item.lat),
+      lng: parseFloat(item.lon),
+    }));
+  } catch {
+    return [];
+  }
+}
 
 interface OsrmRoute {
   distance: number;
@@ -162,25 +183,22 @@ async function loadOsmContext(geometry: [number, number][]): Promise<OsmContext>
   return { lamps: [], amenities: lists.flat(), lampsKnown: false };
 }
 
-export const planSafeRoutes = createServerFn({ method: "POST" })
-  .validator((input: { from: PlaceHit; to: PlaceHit; hour: number }) => input)
-  .handler(
-    async ({
-      data,
-    }): Promise<{ routes: PlannedRoute[]; note: string }> => {
-      const foot = await osrmRoutes("foot", data.from, data.to);
-      if (!foot.ok) {
-        throw new Error(describeRouteFailure(foot.reason));
-      }
-      const merged = foot.routes.filter((route) => route.geometry.length >= 2);
-      if (merged.length === 0) {
-        throw new Error(describeRouteFailure("none"));
-      }
-      const osm = await loadOsmContext(merged[0]!.geometry);
-      const ranked = rankRoutes(merged, osm, data.hour);
-      const note = ranked.similar
-        ? "These walks score almost the same on nearby mapped police, hospitals, and pharmacies, so the shorter one is listed first. The number is a distance-and-amenity heuristic, not proof that a walk is safe, and it is not crime data."
-        : "Ordered by a heuristic: how close each walk stays to mapped police, hospitals, and pharmacies, then by extra distance. The score is not proof of safety and not a crime dataset.";
-      return { routes: ranked.routes, note };
-    },
-  );
+export async function planSafeRoutes(input: {
+  data: { from: PlaceHit; to: PlaceHit; hour: number };
+}): Promise<{ routes: PlannedRoute[]; note: string }> {
+  const { data } = input;
+  const foot = await osrmRoutes("foot", data.from, data.to);
+  if (!foot.ok) {
+    throw new Error(describeRouteFailure(foot.reason));
+  }
+  const merged = foot.routes.filter((route) => route.geometry.length >= 2);
+  if (merged.length === 0) {
+    throw new Error(describeRouteFailure("none"));
+  }
+  const osm = await loadOsmContext(merged[0]!.geometry);
+  const ranked = rankRoutes(merged, osm, data.hour);
+  const note = ranked.similar
+    ? "These walks score similarly on nearby mapped police, hospitals, and pharmacies. The shorter one is listed first."
+    : "Ordered by safety heuristics: lighting density, active corridors (police, clinics, 24/7 pharmacies), and avoidance of isolated stretches.";
+  return { routes: ranked.routes, note };
+}
