@@ -411,31 +411,88 @@ function Planner({
           {routes.map((route) => {
             const active = route.id === selected?.id;
             const title =
-              route.kind === "safest"
+              route.objectiveLabel ||
+              (route.kind === "safest"
                 ? "Closer to services"
                 : route.kind === "shortest"
-                  ? "Shorter walk"
-                  : "Alternate walk";
+                  ? "Fastest walk"
+                  : "Alternate walk");
+            const badgeTone =
+              route.safetyScore >= 60
+                ? "success"
+                : route.safetyScore >= 35
+                  ? "neutral"
+                  : "warning";
+
             return (
               <button
                 key={route.id}
                 type="button"
                 onClick={() => setSelectedId(route.id)}
-                className={`rounded-[16px] border p-3.5 text-left ${
-                  active ? "border-primary bg-secondary" : "border-border bg-card"
+                className={`flex flex-col gap-2 rounded-[16px] border p-3.5 text-left transition-colors ${
+                  active
+                    ? "border-primary bg-secondary ring-1 ring-primary/20"
+                    : "border-border bg-card hover:border-muted-fg/40"
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-fg">{title}</p>
-                  <Badge tone="neutral">Score {route.safetyScore}</Badge>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-semibold text-fg">{title}</p>
+                      {route.objective === "recommended" ? (
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                          Best balance
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-muted-fg">
+                      {formatWalkTime(route.durationSeconds)} ·{" "}
+                      {formatKm(route.distanceMeters)}
+                      {route.detourMeters && route.detourMeters > 50 ? (
+                        <span className="text-muted-fg/80">
+                          {" "}(+{formatKm(route.detourMeters)} detour)
+                        </span>
+                      ) : null}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <Badge tone={badgeTone}>
+                      Score {route.safetyScore}/100
+                    </Badge>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-fg">
+                      {route.confidence ? `${route.confidence} coverage` : "heuristic"}
+                    </span>
+                  </div>
                 </div>
-                <p className="mt-1 text-[11px] text-muted-fg">
-                  {formatWalkTime(route.durationSeconds)} ·{" "}
-                  {formatKm(route.distanceMeters)} · walking
-                </p>
-                {route.reasons[0] ? (
-                  <p className="mt-1 text-[11px] leading-4 text-muted-fg">
-                    {route.reasons[0]}
+
+                {/* Positive reasons */}
+                {route.reasons && route.reasons.length > 0 ? (
+                  <div className="space-y-1 rounded-[10px] bg-card/60 p-2 text-[11px] leading-4 text-fg">
+                    {route.reasons.map((reason, i) => (
+                      <p key={i} className="flex items-start gap-1.5">
+                        <span className="font-bold text-primary">✓</span>
+                        <span>{reason}</span>
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+
+                {/* Concerns */}
+                {route.concerns && route.concerns.length > 0 ? (
+                  <div className="space-y-1 rounded-[10px] bg-warning/10 p-2 text-[11px] leading-4 text-warning-fg">
+                    {route.concerns.map((concern, i) => (
+                      <p key={i} className="flex items-start gap-1.5">
+                        <span className="font-bold text-warning">!</span>
+                        <span>{concern}</span>
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+
+                {/* Traversed streets */}
+                {route.traversedStreets && route.traversedStreets.length > 0 ? (
+                  <p className="truncate text-[10px] text-muted-fg">
+                    Via: {route.traversedStreets.slice(0, 4).join(", ")}
                   </p>
                 ) : null}
               </button>

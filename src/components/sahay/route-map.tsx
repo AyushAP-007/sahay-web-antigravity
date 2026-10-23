@@ -39,21 +39,38 @@ export function RouteMap({
       }).addTo(created);
 
       const bounds = L.latLngBounds([]);
-      for (const route of routes) {
+      // Render non-selected routes first, then the selected route on top
+      const sortedRoutes = [...routes].sort((a, b) => {
+        if (a.id === selected.id) return 1;
+        if (b.id === selected.id) return -1;
+        return 0;
+      });
+
+      for (const route of sortedRoutes) {
         const isSelected = route.id === selected.id;
+        const color = isSelected
+          ? "#0f766e" // Primary Teal
+          : route.objective === "fastest"
+            ? "#64748b" // Slate
+            : route.objective === "safety-focused"
+              ? "#15803d" // Green
+              : "#94a3b8"; // Muted gray
+
         const line = L.polyline(route.geometry, {
-          color: isSelected ? "#176d60" : "#9aa59f",
-          weight: isSelected ? 5 : 3,
-          opacity: isSelected ? 0.95 : 0.55,
+          color,
+          weight: isSelected ? 5.5 : 3.5,
+          opacity: isSelected ? 0.95 : 0.6,
+          dashArray: !isSelected && route.objective === "fastest" ? "4, 6" : undefined,
         }).addTo(created);
         bounds.extend(line.getBounds());
       }
+
       const origin = selected.geometry[0]!;
       const dest = selected.geometry[selected.geometry.length - 1]!;
       L.circleMarker(origin, {
         radius: 6,
-        color: "#176d60",
-        fillColor: "#176d60",
+        color: "#0f766e",
+        fillColor: "#0f766e",
         fillOpacity: 1,
       }).addTo(created);
       L.circleMarker(dest, {
@@ -62,6 +79,7 @@ export function RouteMap({
         fillColor: "#b94f43",
         fillOpacity: 1,
       }).addTo(created);
+
       if (bounds.isValid()) {
         created.fitBounds(bounds, { padding: [18, 18] });
       }
@@ -88,7 +106,7 @@ export function RouteMap({
   return (
     <div
       className="overflow-hidden rounded-[16px] bg-muted"
-      style={{ height: 192, minHeight: 192, flexShrink: 0 }}
+      style={{ height: 210, minHeight: 210, flexShrink: 0 }}
     >
       <div
         ref={hostRef}
