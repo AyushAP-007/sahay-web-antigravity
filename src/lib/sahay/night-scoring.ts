@@ -369,6 +369,7 @@ export function analyzeRouteDistributionAndGaps(
 
 /**
  * Calculates transparent, mode-specific Night Activity Score (0-100) and factor breakdowns.
+ * Normalizes available factor weights so missing sources (like cameras) do not unfairly distort comparisons.
  */
 export function calculateNightActivityScore(
   analysis: RouteGapAnalysis,
@@ -381,12 +382,40 @@ export function calculateNightActivityScore(
   confidence: "high" | "medium" | "low";
   missingDataNotes: string[];
 } {
-  const weights = MODE_WEIGHTS[mode];
+  const baseWeights = MODE_WEIGHTS[mode];
   const factors: FactorScoreItem[] = [];
   const missingDataNotes: string[] = [];
 
+  // Exclude unavailable factors and normalize remaining weights to sum to 100
+  const totalBaseWeight = 100;
+  const unavailableWeight = !hasCameraData ? baseWeights.cameraCoverage : 0;
+  const availableWeight = totalBaseWeight - unavailableWeight;
+  const normFactor = availableWeight > 0 ? totalBaseWeight / availableWeight : 1;
+
+  const weights = {
+    openActivityPlaces: Math.round(baseWeights.openActivityPlaces * normFactor),
+    openHelpPoints: Math.round(baseWeights.openHelpPoints * normFactor),
+    mainRoadCoverage: Math.round(baseWeights.mainRoadCoverage * normFactor),
+    openTransport: Math.round(baseWeights.openTransport * normFactor),
+    fewerGaps: Math.round(baseWeights.fewerGaps * normFactor),
+    fewerTurns: Math.round(baseWeights.fewerTurns * normFactor),
+    cameraCoverage: hasCameraData ? baseWeights.cameraCoverage : 0,
+  };
+
+  // Adjust one factor to ensure sum is exactly 100
+  const currentSum =
+    weights.openActivityPlaces +
+    weights.openHelpPoints +
+    weights.mainRoadCoverage +
+    weights.openTransport +
+    weights.fewerGaps +
+    weights.fewerTurns +
+    weights.cameraCoverage;
+  if (currentSum !== 100) {
+    weights.openActivityPlaces += 100 - currentSum;
+  }
+
   // 1. Open Activity Places
-  // Density benchmark: ~1 open place per 300m for max score
   const activityScoreRatio = Math.min(1, analysis.totalOpenPlaces / 6);
   const activityScore = Math.round(activityScoreRatio * weights.openActivityPlaces);
   factors.push({
@@ -399,7 +428,6 @@ export function calculateNightActivityScore(
   });
 
   // 2. Open Help Points
-  // Benchmark: 2+ open help points for max score
   const helpRatio = Math.min(1, analysis.totalOpenHelpPoints / 2);
   const helpScore = Math.round(helpRatio * weights.openHelpPoints);
   factors.push({
@@ -452,7 +480,6 @@ export function calculateNightActivityScore(
   });
 
   // 6. Fewer Turns
-  // Optimal: 4 or fewer turns. Penalize if > 8 turns.
   const turnRatio = Math.max(0, 1 - Math.max(0, analysis.meaningfulTurnsCount - 4) / 8);
   const turnScore = Math.round(turnRatio * weights.fewerTurns);
   factors.push({
@@ -465,20 +492,19 @@ export function calculateNightActivityScore(
   });
 
   // 7. Mapped Camera Coverage
-  let cameraScore = 0;
   if (!hasCameraData) {
-    missingDataNotes.push("Surveillance camera data unavailable from OpenStreetMap for this corridor.");
+    missingDataNotes.push("Surveillance camera data unavailable from OpenStreetMap for this corridor (weights normalized).");
     factors.push({
       id: "cameras",
       name: "Camera Coverage",
       score: 0,
-      maxScore: weights.cameraCoverage,
+      maxScore: 0,
       description: "Surveillance camera coverage mapped in OpenStreetMap.",
-      evidence: "Camera data unavailable from provider (neutral 0 pts).",
+      evidence: "Camera data unavailable from provider (excluded from comparison).",
     });
   } else {
     const camRatio = Math.min(1, (analysis.cameraCount / 4) * 0.5 + analysis.cameraDistributionScore * 0.5);
-    cameraScore = Math.round(camRatio * weights.cameraCoverage);
+    const cameraScore = Math.round(camRatio * weights.cameraCoverage);
     factors.push({
       id: "cameras",
       name: "Camera Coverage",
@@ -493,16 +519,20 @@ export function calculateNightActivityScore(
   const totalScore = factors.reduce((acc, f) => acc + f.score, 0);
   const clampedScore = Math.max(5, Math.min(98, totalScore));
 
-  // Confidence check
-  let unknownHoursCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
-  if (unknownHoursCount > 0) {
-    missingDataNotes.push(`${unknownHoursCount} nearby place(s) had unlisted or unparseable opening hours.`);
+  // Count place data states
+  const totalPlaces = placesAlongRoute.length;
+  const openCount = placesAlongRoute.filter((p) => p.openingStatus === "open").length;
+  const closedCount = placesAlongRoute.filter((p) => p.openingStatus === "closed").length;
+  const unknownCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
+
+  if (unknownCount > 0) {
+    missingDataNotes.push(`${unknownCount} nearby place(s) had unlisted or unparseable opening hours.`);
   }
 
   const confidence: "high" | "medium" | "low" =
-    hasCameraData && unknownHoursCount <= 2
+    hasCameraData && unknownCount <= 2 && totalPlaces >= 4
       ? "high"
-      : unknownHoursCount > 5 || !hasCameraData
+      : unknownCount > 5 || !hasCameraData || totalPlaces < 3
         ? "low"
         : "medium";
 

@@ -535,7 +535,7 @@ function Planner({
           onClick={() => void findRoutes()}
         >
           <Search className="size-4" />
-          {busy === "search" ? "Analyzing night routes…" : "Compare night routes"}
+          {busy === "search" ? "Analyzing routes…" : "Analyze routes"}
         </Button>
         {error ? (
           <p className="text-[13px] font-medium text-danger">{error}</p>
@@ -678,6 +678,22 @@ function Planner({
                     </span>
                   </div>
                 </button>
+
+                {/* Places state breakdown summary */}
+                {route.placesAlongRoute && (
+                  <p className="text-[11px] text-muted-fg">
+                    {route.placesAlongRoute.length > 0 ? (
+                      <>
+                        <span className="font-semibold text-fg">{route.placesAlongRoute.length} places found</span> ·{" "}
+                        <span className="text-primary font-medium">{route.placesAlongRoute.filter((p) => p.openingStatus === "open").length} open</span> ·{" "}
+                        <span className="text-danger font-medium">{route.placesAlongRoute.filter((p) => p.openingStatus === "closed").length} closed</span> ·{" "}
+                        <span className="text-muted-fg">{route.placesAlongRoute.filter((p) => p.openingStatus === "unknown").length} hours unknown</span>
+                      </>
+                    ) : (
+                      <span className="italic text-muted-fg">No mapped places found along this corridor</span>
+                    )}
+                  </p>
+                )}
 
                 {/* Gap Analysis Summary */}
                 {route.gapAnalysis ? (

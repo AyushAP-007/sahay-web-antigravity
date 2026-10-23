@@ -297,6 +297,7 @@ export const fetchMultiPathWalkingRoutes = (from: PlaceHit, to: PlaceHit) =>
 
 /**
  * Loads rich categorized places along candidate routes.
+ * Uses Nominatim with viewbox bounding and fallback to Photon.
  */
 export async function loadPuneCategorizedPlaces(
   geometries: Array<[number, number][]>,
@@ -308,66 +309,82 @@ export async function loadPuneCategorizedPlaces(
 
   const lats = allPoints.map((p) => p[0]);
   const lngs = allPoints.map((p) => p[1]);
-  const south = Math.min(...lats) - 0.01;
-  const north = Math.max(...lats) + 0.01;
-  const west = Math.min(...lngs) - 0.01;
-  const east = Math.max(...lngs) + 0.01;
+  const south = Math.min(...lats) - 0.015;
+  const north = Math.max(...lats) + 0.015;
+  const west = Math.min(...lngs) - 0.015;
+  const east = Math.max(...lngs) + 0.015;
 
   const centerLat = (south + north) / 2;
   const centerLng = (west + east) / 2;
 
-  const categoryQueries = [
-    { cat: "shop_food" as const, query: "shop", osmTag: "shop" },
-    { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
-    { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
-    { cat: "pharmacy_medical" as const, query: "clinic", osmTag: "amenity:clinic" },
-    { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
-    { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
-    { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
-    { cat: "transport" as const, query: "railway", osmTag: "railway:station" },
+  // Viewbox format: left,top,right,bottom -> minLng,maxLat,maxLng,minLat
+  const viewboxStr = `${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)},${south.toFixed(4)}`;
+
+  const nominatimQueries = [
+    { cat: "hospital" as const, q: "hospital" },
+    { cat: "pharmacy_medical" as const, q: "pharmacy" },
+    { cat: "pharmacy_medical" as const, q: "clinic" },
+    { cat: "shop_food" as const, q: "restaurant" },
+    { cat: "shop_food" as const, q: "cafe" },
+    { cat: "shop_food" as const, q: "bakery" },
+    { cat: "shop_food" as const, q: "supermarket" },
+    { cat: "fuel_cng" as const, q: "petrol" },
+    { cat: "transport" as const, q: "bus stop" },
+    { cat: "transport" as const, q: "railway station" },
   ];
 
   const fetchedPlaces: MappedPlace[] = [];
 
+  // Query Nominatim bounded within the journey corridor viewbox
   await Promise.all(
-    categoryQueries.map(async (cq, idx) => {
+    nominatimQueries.map(async (nq, idx) => {
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=30&osm_tag=${encodeURIComponent(cq.osmTag)}`;
-        const payload = await fetchJson<{
-          features?: Array<{
-            geometry?: { coordinates?: number[] };
-            properties?: {
-              name?: string;
-              osm_id?: number;
-              opening_hours?: string;
-              [k: string]: any;
-            };
-          }>;
-        }>(url, {}, 8000);
+        const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(nq.q)}&viewbox=${viewboxStr}&bounded=1&limit=15&extratags=1&addressdetails=1`;
+        const items = await fetchJson<
+          Array<{
+            place_id?: number;
+            lat: string;
+            lon: string;
+            display_name: string;
+            extratags?: Record<string, string>;
+          }>
+        >(
+          nomUrl,
+          {
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+          },
+          7000,
+        );
 
-        for (const f of payload.features ?? []) {
-          const [lng, lat] = f.geometry?.coordinates ?? [];
-          if (typeof lat !== "number" || typeof lng !== "number") continue;
+        for (const item of items ?? []) {
+          const lat = parseFloat(item.lat);
+          const lng = parseFloat(item.lon);
+          if (isNaN(lat) || isNaN(lng)) continue;
           if (lat < south || lat > north || lng < west || lng > east) continue;
 
-          // Default hours heuristic for standard Indian amenities if tag missing
-          let rawHours = f.properties?.opening_hours;
+          const rawName = item.display_name.split(",")[0]?.trim() || `${nq.cat}`;
+          let rawHours = item.extratags?.opening_hours;
+
+          // Default schedule if untagged
           if (!rawHours) {
-            if (cq.cat === "hospital") {
-              rawHours = "24/7"; // Hospitals operate 24/7 in Pune
-            } else if (cq.cat === "shop_food") {
-              rawHours = "Mo-Su 10:00-23:00"; // Common shop/restaurant schedule
-            } else if (cq.cat === "fuel_cng") {
+            if (nq.cat === "hospital") {
+              rawHours = "24/7";
+            } else if (nq.cat === "shop_food") {
+              rawHours = "Mo-Su 10:00-23:00";
+            } else if (nq.cat === "fuel_cng") {
               rawHours = "Mo-Su 06:00-23:00";
-            } else if (cq.cat === "transport") {
+            } else if (nq.cat === "transport") {
               rawHours = "Mo-Su 05:00-23:30";
             }
           }
 
           fetchedPlaces.push({
-            id: `place-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
-            name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
-            category: cq.cat,
+            id: `nom-${nq.cat}-${item.place_id || idx}-${Math.round(lat * 10000)}`,
+            name: rawName,
+            category: nq.cat,
             lat,
             lng,
             openingHoursRaw: rawHours,
@@ -379,13 +396,64 @@ export async function loadPuneCategorizedPlaces(
     }),
   );
 
+  // If Nominatim yielded places, deduplicate them; otherwise try Photon fallback
+  if (fetchedPlaces.length === 0) {
+    const categoryQueries = [
+      { cat: "shop_food" as const, query: "shop", osmTag: "shop" },
+      { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
+      { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
+      { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
+      { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
+      { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
+    ];
+
+    await Promise.all(
+      categoryQueries.map(async (cq, idx) => {
+        try {
+          const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=15&osm_tag=${encodeURIComponent(cq.osmTag)}`;
+          const payload = await fetchJson<{
+            features?: Array<{
+              geometry?: { coordinates?: number[] };
+              properties?: {
+                name?: string;
+                osm_id?: number;
+                opening_hours?: string;
+                [k: string]: any;
+              };
+            }>;
+          }>(url, { headers: { "User-Agent": "Mozilla/5.0" } }, 5000);
+
+          for (const f of payload.features ?? []) {
+            const [lng, lat] = f.geometry?.coordinates ?? [];
+            if (typeof lat !== "number" || typeof lng !== "number") continue;
+            if (lat < south || lat > north || lng < west || lng > east) continue;
+
+            let rawHours = f.properties?.opening_hours;
+            if (!rawHours && cq.cat === "hospital") rawHours = "24/7";
+
+            fetchedPlaces.push({
+              id: `photon-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
+              name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
+              category: cq.cat,
+              lat,
+              lng,
+              openingHoursRaw: rawHours,
+            });
+          }
+        } catch {
+          // Continue
+        }
+      }),
+    );
+  }
+
   const deduplicated = deduplicatePlaces(fetchedPlaces);
 
   // Check Overpass for live surveillance cameras
   let cameras: MappedPlace[] = [];
   let camerasAvailable = false;
 
-  const overpassQuery = `[out:json][timeout:6];node["man_made"="surveillance"](${south.toFixed(4)},${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)});out body 25;`;
+  const overpassQuery = `[out:json][timeout:5];node["man_made"="surveillance"](${south.toFixed(4)},${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)});out body 25;`;
   try {
     const ovRes = await fetchJson<{
       elements?: Array<{ id: number; lat: number; lon: number; tags?: any }>;
@@ -396,7 +464,7 @@ export async function loadPuneCategorizedPlaces(
         "User-Agent": UA,
       },
       body: `data=${encodeURIComponent(overpassQuery)}`,
-    }, 6000);
+    }, 5000);
 
     if (ovRes.elements) {
       camerasAvailable = true;
@@ -483,24 +551,24 @@ export async function planSafeRoutes(input: {
 
   // Calculate Night Activity Score and time-aware passing for each candidate
   const enhancedRoutes: PlannedRoute[] = rankedBase.routes.map((route) => {
-    // 1. Evaluate places along this specific route
+    // 1. Evaluate places along this specific route (120m corridor for accurate street-level matching)
     const placesAlong = evaluatePlacesAlongRoute(
       places,
       route.geometry,
       route.distanceMeters,
       route.durationSeconds,
       departureDate,
-      70, // 70m corridor
+      120, // 120m corridor
     );
 
-    // 2. Evaluate cameras along this route
+    // 2. Evaluate cameras along this route (100m corridor)
     const camerasAlong = evaluatePlacesAlongRoute(
       cameras,
       route.geometry,
       route.distanceMeters,
       route.durationSeconds,
       departureDate,
-      60, // 60m corridor
+      100, // 100m corridor
     );
 
     // 3. Gap analysis & distribution

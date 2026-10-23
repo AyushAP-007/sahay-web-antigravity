@@ -32,38 +32,71 @@ export function RouteMap({
   layers?: LayerVisibility;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const layersGroupRef = useRef<any>(null);
+  const fittedRouteIdRef = useRef<string | null>(null);
 
+  // Initialize Map once
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || routes.length === 0) return;
+    if (!host) return;
+
     let cancelled = false;
-    let map: {
-      remove: () => void;
-      invalidateSize: () => void;
-    } | null = null;
 
     void (async () => {
       const mod = await import("leaflet");
       await import("leaflet/dist/leaflet.css");
-      if (cancelled || !hostRef.current) return;
+      if (cancelled || !hostRef.current || mapInstanceRef.current) return;
+
       const L: any = mod.default;
-      host.innerHTML = "";
-      const selected =
-        routes.find((route) => route.id === selectedId) ?? routes[0]!;
-      const start = selected.geometry[0]!;
-      const created = L.map(host, {
+      const initialCenter: [number, number] = [18.5204, 73.8567]; // Central Pune default
+      const map = L.map(host, {
         zoomControl: false,
         attributionControl: true,
-      }).setView(start, 14);
-      map = created;
+      }).setView(initialCenter, 13);
+
       L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap",
         maxZoom: 18,
-      }).addTo(created);
+      }).addTo(map);
+
+      const layerGroup = L.layerGroup().addTo(map);
+      mapInstanceRef.current = map;
+      layersGroupRef.current = layerGroup;
+
+      window.setTimeout(() => map.invalidateSize(), 80);
+    })();
+
+    return () => {
+      cancelled = true;
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+        layersGroupRef.current = null;
+        fittedRouteIdRef.current = null;
+      }
+    };
+  }, []);
+
+  // Update Route Polylines and Markers without recreating map instance
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    const group = layersGroupRef.current;
+    if (!map || !group || routes.length === 0) return;
+
+    void (async () => {
+      const mod = await import("leaflet");
+      const L: any = mod.default;
+
+      // Clear previous layers (lines, markers)
+      group.clearLayers();
+
+      const selected =
+        routes.find((route) => route.id === selectedId) ?? routes[0]!;
 
       const bounds = L.latLngBounds([]);
 
-      // Render non-selected routes first, then the selected route on top
+      // 1. Draw non-selected routes first, then selected route
       const sortedRoutes = [...routes].sort((a, b) => {
         if (a.id === selected.id) return 1;
         if (b.id === selected.id) return -1;
@@ -76,7 +109,8 @@ export function RouteMap({
           ? "#0f766e" // Primary Teal
           : route.objective === "fastest"
             ? "#64748b" // Slate
-            : route.objective === "safety-focused" || route.objectiveLabel?.includes("Night activity-favoured")
+            : route.objective === "safety-focused" ||
+                route.objectiveLabel?.includes("Night activity-favoured")
               ? "#15803d" // Green
               : "#94a3b8"; // Muted gray
 
@@ -84,15 +118,18 @@ export function RouteMap({
           color,
           weight: isSelected ? 5.5 : 3.5,
           opacity: isSelected ? 0.95 : 0.6,
-          dashArray: !isSelected && route.objective === "fastest" ? "4, 6" : undefined,
-        }).addTo(created);
+          dashArray:
+            !isSelected && route.objective === "fastest" ? "4, 6" : undefined,
+        });
+        group.addLayer(line);
         bounds.extend(line.getBounds());
       }
 
-      // Render Categorized Place Markers if layers enabled
-      const placesToRender = selected.placesAlongRoute && selected.placesAlongRoute.length > 0
-        ? selected.placesAlongRoute
-        : places;
+      // 2. Render Categorized Place Markers along route
+      const placesToRender =
+        selected.placesAlongRoute && selected.placesAlongRoute.length > 0
+          ? selected.placesAlongRoute
+          : places;
 
       for (const p of placesToRender) {
         let visible = false;
@@ -119,26 +156,27 @@ export function RouteMap({
             fillOpacity: isOpen ? 0.95 : 0.45,
             weight: 2,
           });
-          marker.addTo(created);
 
           marker.bindPopup(`
             <div style="font-family: sans-serif; font-size: 12px; line-height: 1.4;">
               <strong style="color: ${meta.color};">${meta.label}</strong><br/>
               <b>${p.name}</b><br/>
-              <span style="font-weight: 600; color: ${isOpen ? '#16a34a' : p.openingStatus === 'closed' ? '#dc2626' : '#64748b'};">
+              <span style="font-weight: 600; color: ${isOpen ? "#16a34a" : p.openingStatus === "closed" ? "#dc2626" : "#64748b"};">
                 ● ${statusText}
               </span>
               ${p.estimatedPassingMinute !== undefined ? `<br/><span style="color:#64748b;">Pass ~${p.estimatedPassingMinute}m into journey</span>` : ""}
             </div>
           `);
+          group.addLayer(marker);
         }
       }
 
-      // Render Cameras if layer enabled
+      // 3. Render Cameras along route
       if (layers.cameras) {
-        const camsToRender = selected.camerasAlongRoute && selected.camerasAlongRoute.length > 0
-          ? selected.camerasAlongRoute
-          : cameras;
+        const camsToRender =
+          selected.camerasAlongRoute && selected.camerasAlongRoute.length > 0
+            ? selected.camerasAlongRoute
+            : cameras;
 
         for (const cam of camsToRender) {
           const camMarker = L.circleMarker([cam.lat, cam.lng], {
@@ -148,7 +186,6 @@ export function RouteMap({
             fillOpacity: 0.9,
             weight: 2,
           });
-          camMarker.addTo(created);
 
           camMarker.bindPopup(`
             <div style="font-family: sans-serif; font-size: 12px;">
@@ -156,10 +193,11 @@ export function RouteMap({
               <span style="color: #64748b;">Mapped on OpenStreetMap.<br/>Note: Live recording/monitoring not guaranteed.</span>
             </div>
           `);
+          group.addLayer(camMarker);
         }
       }
 
-      // Origin and destination markers
+      // 4. Origin & Destination Markers
       const origin = selected.geometry[0]!;
       const dest = selected.geometry[selected.geometry.length - 1]!;
       const origMarker = L.circleMarker(origin, {
@@ -168,8 +206,8 @@ export function RouteMap({
         fillColor: "#0f766e",
         fillOpacity: 1,
       });
-      origMarker.addTo(created);
       origMarker.bindPopup("<b>Journey Origin</b>");
+      group.addLayer(origMarker);
 
       const destMarker = L.circleMarker(dest, {
         radius: 7,
@@ -177,31 +215,17 @@ export function RouteMap({
         fillColor: "#b94f43",
         fillOpacity: 1,
       });
-      destMarker.addTo(created);
       destMarker.bindPopup("<b>Destination</b>");
+      group.addLayer(destMarker);
 
-      if (bounds.isValid()) {
-        created.fitBounds(bounds, { padding: [18, 18] });
+      // Only fitBounds ONCE when candidate route set changes or journey starts
+      const currentRouteKey = routes.map((r) => r.id).join(",");
+      if (fittedRouteIdRef.current !== currentRouteKey && bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [22, 22], animate: false });
+        fittedRouteIdRef.current = currentRouteKey;
       }
-      window.setTimeout(() => map?.invalidateSize(), 80);
     })();
-
-    return () => {
-      cancelled = true;
-      map?.remove();
-    };
   }, [routes, selectedId, places, cameras, layers]);
-
-  if (routes.length === 0) {
-    return (
-      <div
-        className="flex items-center justify-center rounded-[16px] bg-muted text-xs text-muted-fg"
-        style={{ height: 210, minHeight: 210, flexShrink: 0 }}
-      >
-        Select origin & destination to view Pune night routes.
-      </div>
-    );
-  }
 
   return (
     <div
