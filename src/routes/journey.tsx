@@ -94,12 +94,10 @@ function JourneyScreen() {
         title="Safe Journey"
         subtitle="Watching the route you chose in Pune."
       >
-        {active.selectedRoute ? (
-          <RouteMap
-            routes={[active.selectedRoute]}
-            selectedId={active.selectedRoute.id}
-          />
-        ) : null}
+        <RouteMap
+          routes={active.selectedRoute ? [active.selectedRoute] : []}
+          selectedId={active.selectedRoute?.id ?? null}
+        />
         <Panel className="gap-3 bg-secondary shadow-none">
           <div className="flex items-center justify-between">
             <p className="text-[9px] font-bold tracking-[0.14em] text-secondary-fg">
@@ -221,6 +219,7 @@ function Planner({
   const [showTutorial, setShowTutorial] = useState(false);
   const [expandedFactorRouteId, setExpandedFactorRouteId] = useState<string | null>(null);
   const [showPlacesList, setShowPlacesList] = useState(false);
+  const [showDirections, setShowDirections] = useState(false);
 
   useEffect(() => {
     const q = fromQuery.trim();
@@ -543,82 +542,88 @@ function Planner({
       </Panel>
 
       {/* Routes Comparison and Map */}
+
+      {/* Map — always visible, shows Pune base map when no routes yet */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-fg">
+            {routes.length > 0 ? "Interactive Pune Route Map" : "Pune Map"}
+          </span>
+          {routes.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowLayerControls(!showLayerControls)}
+              className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-fg hover:text-fg"
+            >
+              <Layers className="size-3" /> Map Layers {showLayerControls ? "▲" : "▼"}
+            </button>
+          ) : null}
+        </div>
+
+        {showLayerControls && routes.length > 0 ? (
+          <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-card p-2 text-[11px]">
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.shopFood}
+                onChange={(e) => setLayers({ ...layers, shopFood: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#eab308]" /> Shops & Food
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.medical}
+                onChange={(e) => setLayers({ ...layers, medical: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#ec4899]" /> Medical/Pharmacies
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.hospital}
+                onChange={(e) => setLayers({ ...layers, hospital: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#2563eb]" /> Hospitals
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.fuel}
+                onChange={(e) => setLayers({ ...layers, fuel: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#16a34a]" /> Fuel/CNG
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.transport}
+                onChange={(e) => setLayers({ ...layers, transport: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#9333ea]" /> Transport
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.cameras}
+                onChange={(e) => setLayers({ ...layers, cameras: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#475569]" /> Cameras
+            </label>
+          </div>
+        ) : null}
+
+        <RouteMap
+          routes={routes}
+          selectedId={selectedId}
+          places={allPlaces}
+          cameras={allCameras}
+          layers={layers}
+        />
+      </div>
+
       {routes.length > 0 ? (
         <>
-          {/* Map with Layer Controls */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-fg">Interactive Pune Route Map</span>
-              <button
-                type="button"
-                onClick={() => setShowLayerControls(!showLayerControls)}
-                className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px] font-medium text-muted-fg hover:text-fg"
-              >
-                <Layers className="size-3" /> Map Layers {showLayerControls ? "▲" : "▼"}
-              </button>
-            </div>
-
-            {showLayerControls ? (
-              <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-card p-2 text-[11px]">
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.shopFood}
-                    onChange={(e) => setLayers({ ...layers, shopFood: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#eab308]" /> Shops & Food
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.medical}
-                    onChange={(e) => setLayers({ ...layers, medical: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#ec4899]" /> Medical/Pharmacies
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.hospital}
-                    onChange={(e) => setLayers({ ...layers, hospital: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#2563eb]" /> Hospitals
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.fuel}
-                    onChange={(e) => setLayers({ ...layers, fuel: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#16a34a]" /> Fuel/CNG
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.transport}
-                    onChange={(e) => setLayers({ ...layers, transport: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#9333ea]" /> Transport
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={layers.cameras}
-                    onChange={(e) => setLayers({ ...layers, cameras: e.target.checked })}
-                  />
-                  <span className="size-2 rounded-full bg-[#475569]" /> Cameras
-                </label>
-              </div>
-            ) : null}
-
-            <RouteMap
-              routes={routes}
-              selectedId={selectedId}
-              places={allPlaces}
-              cameras={allCameras}
-              layers={layers}
-            />
-          </div>
 
           {planNote ? (
             <p className="text-[11px] leading-4 text-muted-fg">{planNote}</p>
@@ -695,31 +700,49 @@ function Planner({
                   </p>
                 )}
 
-                {/* Gap Analysis Summary */}
-                {route.gapAnalysis ? (
-                  <div className="grid grid-cols-2 gap-1.5 rounded-[10px] bg-card/70 p-2 text-[11px] text-fg">
-                    <div>
-                      <span className="text-muted-fg">Open places:</span>{" "}
-                      <strong>{route.gapAnalysis.totalOpenPlaces}</strong> of {route.gapAnalysis.totalPlacesFound}
+                {/* Gap Analysis Summary — only show metrics with actual data */}
+                {route.gapAnalysis ? (() => {
+                  const ga = route.gapAnalysis;
+                  const items: Array<{ label: string; value: string }> = [];
+
+                  if (ga.totalPlacesFound > 0) {
+                    items.push({
+                      label: "Open places",
+                      value: `${ga.totalOpenPlaces} of ${ga.totalPlacesFound}`,
+                    });
+                  }
+                  if (ga.totalOpenHelpPoints > 0) {
+                    items.push({
+                      label: "Open help points",
+                      value: `${ga.totalOpenHelpPoints}`,
+                    });
+                  }
+                  if (ga.longestLowActivityGapMeters > 0) {
+                    items.push({
+                      label: "Longest activity gap",
+                      value: formatKm(ga.longestLowActivityGapMeters),
+                    });
+                  }
+                  if (route.hasCameraData && ga.cameraCount > 0) {
+                    items.push({
+                      label: "Mapped cameras",
+                      value: `${ga.cameraCount} mapped`,
+                    });
+                  }
+
+                  if (items.length === 0) return null;
+
+                  return (
+                    <div className={`grid ${items.length > 2 ? "grid-cols-2" : "grid-cols-1"} gap-1.5 rounded-[10px] bg-card/70 p-2 text-[11px] text-fg`}>
+                      {items.map((item) => (
+                        <div key={item.label}>
+                          <span className="text-muted-fg">{item.label}:</span>{" "}
+                          <strong>{item.value}</strong>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <span className="text-muted-fg">Open help points:</span>{" "}
-                      <strong>{route.gapAnalysis.totalOpenHelpPoints}</strong>
-                    </div>
-                    <div>
-                      <span className="text-muted-fg">Longest activity gap:</span>{" "}
-                      <strong>{formatKm(route.gapAnalysis.longestLowActivityGapMeters)}</strong>
-                    </div>
-                    <div>
-                      <span className="text-muted-fg">Mapped cameras:</span>{" "}
-                      <strong>
-                        {route.hasCameraData
-                          ? `${route.gapAnalysis.cameraCount} mapped`
-                          : "Data unavailable"}
-                      </strong>
-                    </div>
-                  </div>
-                ) : null}
+                  );
+                })() : null}
 
                 {/* Traversed streets */}
                 {route.traversedStreets && route.traversedStreets.length > 0 ? (
@@ -772,6 +795,49 @@ function Planner({
               </div>
             );
           })}
+
+          {/* Turn-by-Turn Directions for Selected Route */}
+          {selected?.navigationSteps && selected.navigationSteps.length > 0 ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-fg">
+                  Directions ({selected.navigationSteps.length} steps)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowDirections(!showDirections)}
+                  className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                >
+                  <Navigation className="size-3" />
+                  {showDirections ? "Hide directions" : "View turn-by-turn"}
+                  {showDirections ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+                </button>
+              </div>
+
+              {showDirections ? (
+                <div className="max-h-64 space-y-0 overflow-y-auto rounded-xl border border-border bg-card text-xs">
+                  {selected.navigationSteps.map((step, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-start gap-2.5 border-b border-border/50 px-3 py-2 last:border-b-0"
+                    >
+                      <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-bold text-primary">
+                        {idx + 1}
+                      </span>
+                      <div className="flex-1">
+                        <p className="font-medium text-fg">{step.instruction}</p>
+                        {step.distanceMeters > 0 ? (
+                          <p className="text-[10px] text-muted-fg">
+                            {formatKm(step.distanceMeters)} · {formatWalkTime(step.durationSeconds)}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {/* Places Along Selected Route Details */}
           {selected?.placesAlongRoute && selected.placesAlongRoute.length > 0 ? (

@@ -12,6 +12,7 @@ import {
   extractRouteFeatures,
   haversineMeters,
   rankAndCategorizeRoutes,
+  type NavigationStep,
   type OsmContext,
   type PlaceHit,
   type PlannedRoute,
@@ -67,8 +68,30 @@ export async function searchPlaces(input: {
   const query = input.data.query.trim();
   if (query.length < 2) return [];
 
-  // Search biased toward central Pune
-  try {
+  // Strategy: Try Nominatim first (more reliable), with Photon as fast fallback.
+  // Race both with a short timeout so the UI never hangs.
+
+  const nominatimPromise = (async (): Promise<PlaceHit[]> => {
+    const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Pune")}&format=json&limit=6&countrycodes=in&viewbox=73.65,18.35,74.05,18.7&bounded=0`;
+    const nomHits = await fetchJson<
+      Array<{ display_name: string; lat: string; lon: string }>
+    >(nomUrl, { headers: { "User-Agent": UA } }, 6000);
+
+    return nomHits
+      .map((item) => {
+        const lat = parseFloat(item.lat);
+        const lng = parseFloat(item.lon);
+        if (isNaN(lat) || isNaN(lng)) return null;
+        return {
+          label: item.display_name.split(",").slice(0, 3).join(","),
+          lat,
+          lng,
+        } satisfies PlaceHit;
+      })
+      .filter((h): h is PlaceHit => h !== null);
+  })();
+
+  const photonPromise = (async (): Promise<PlaceHit[]> => {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=18.5204&lon=73.8567&limit=8&lang=en`;
     const payload = await fetchJson<{
       features?: Array<{
@@ -81,9 +104,9 @@ export async function searchPlaces(input: {
           country?: string;
         };
       }>;
-    }>(url);
+    }>(url, {}, 3000); // Short 3s timeout for Photon
 
-    const hits = (payload.features ?? [])
+    return (payload.features ?? [])
       .map((feature) => {
         const [lng, lat] = feature.geometry?.coordinates ?? [];
         if (typeof lat !== "number" || typeof lng !== "number") return null;
@@ -108,32 +131,37 @@ export async function searchPlaces(input: {
         } satisfies PlaceHit;
       })
       .filter((item): item is PlaceHit => item !== null);
+  })();
 
-    if (hits.length > 0) return hits.slice(0, 5);
-  } catch (err) {
-    console.warn("Photon search fallback:", err);
-  }
-
-  // Backup: Nominatim restricted to Pune
+  // Race: whichever returns valid results first wins
   try {
-    const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Pune")}&format=json&limit=5&countrycodes=in`;
-    const nomHits = await fetchJson<
-      Array<{ display_name: string; lat: string; lon: string }>
-    >(nomUrl, { headers: { "User-Agent": UA } });
+    const results = await Promise.allSettled([nominatimPromise, photonPromise]);
 
-    return nomHits.map((item) => ({
-      label: item.display_name.split(",").slice(0, 3).join(","),
-      lat: parseFloat(item.lat),
-      lng: parseFloat(item.lon),
-    }));
-  } catch (err) {
-    console.warn("Nominatim search failed:", err);
+    // Prefer Nominatim results (index 0) as primary
+    const nomResult = results[0];
+    if (nomResult.status === "fulfilled" && nomResult.value.length > 0) {
+      return nomResult.value.slice(0, 5);
+    }
+
+    // Fall back to Photon results
+    const photonResult = results[1];
+    if (photonResult.status === "fulfilled" && photonResult.value.length > 0) {
+      return photonResult.value.slice(0, 5);
+    }
+
+    // Both failed or returned empty — log for debugging
+    if (nomResult.status === "rejected") console.warn("Nominatim search failed:", nomResult.reason);
+    if (photonResult.status === "rejected") console.warn("Photon search failed:", photonResult.reason);
+    return [];
+  } catch {
     return [];
   }
 }
 
 interface OsrmStep {
   name?: string;
+  distance?: number;
+  duration?: number;
   maneuver?: {
     type?: string;
     modifier?: string;
@@ -188,6 +216,65 @@ function countMeaningfulTurns(route: OsrmRoute): number {
   return count;
 }
 
+function formatManeuverInstruction(step: OsrmStep): string {
+  const type = step.maneuver?.type ?? "continue";
+  const modifier = step.maneuver?.modifier ?? "";
+  const streetName = step.name?.trim() || "unnamed road";
+
+  switch (type) {
+    case "depart":
+      return `Start on ${streetName}`;
+    case "arrive":
+      return `Arrive at destination`;
+    case "turn":
+      return `Turn ${modifier} onto ${streetName}`;
+    case "end of road":
+      return `At end of road, turn ${modifier} onto ${streetName}`;
+    case "fork":
+      return `Take the ${modifier} fork onto ${streetName}`;
+    case "roundabout":
+      return `Enter roundabout, exit onto ${streetName}`;
+    case "new name":
+      return `Continue onto ${streetName}`;
+    case "merge":
+      return `Merge ${modifier} onto ${streetName}`;
+    case "continue":
+      return modifier ? `Continue ${modifier} on ${streetName}` : `Continue on ${streetName}`;
+    default:
+      return modifier ? `${modifier} onto ${streetName}` : `Continue on ${streetName}`;
+  }
+}
+
+function extractNavigationSteps(route: OsrmRoute): NavigationStep[] {
+  const steps: NavigationStep[] = [];
+  for (const leg of route.legs ?? []) {
+    for (const step of leg.steps ?? []) {
+      const type = step.maneuver?.type ?? "continue";
+      // Skip arrive step with 0 distance
+      if (type === "arrive" && (step.distance ?? 0) < 1) {
+        steps.push({
+          instruction: "Arrive at destination",
+          streetName: step.name?.trim() || "",
+          distanceMeters: 0,
+          durationSeconds: 0,
+          type,
+          modifier: step.maneuver?.modifier,
+        });
+        continue;
+      }
+      steps.push({
+        instruction: formatManeuverInstruction(step),
+        streetName: step.name?.trim() || "",
+        distanceMeters: step.distance ?? 0,
+        durationSeconds: step.duration ?? 0,
+        type,
+        modifier: step.maneuver?.modifier,
+      });
+    }
+  }
+  return steps;
+}
+
 /**
  * Fetches real candidate routes using mode-specific OSRM routers (foot, bike, or car).
  */
@@ -227,6 +314,7 @@ export async function fetchMultiPathRoutes(
           ),
           streetNames: extractStreetNames(route),
           meaningfulTurnsCount: countMeaningfulTurns(route),
+          navigationSteps: extractNavigationSteps(route),
         });
       });
     }
@@ -279,6 +367,7 @@ export async function fetchMultiPathRoutes(
               ),
               streetNames: extractStreetNames(r),
               meaningfulTurnsCount: countMeaningfulTurns(r),
+              navigationSteps: extractNavigationSteps(r),
             });
           }
         }
@@ -601,6 +690,7 @@ export async function planSafeRoutes(input: {
       placesAlongRoute: placesAlong,
       camerasAlongRoute: camerasAlong,
       hasCameraData: camerasAvailable,
+      navigationSteps: rawMatch?.navigationSteps,
       missingDataNotes: [
         ...(route.missingDataNotes ?? []),
         ...scoring.missingDataNotes,

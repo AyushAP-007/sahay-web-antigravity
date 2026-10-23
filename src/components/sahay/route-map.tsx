@@ -82,7 +82,15 @@ export function RouteMap({
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = layersGroupRef.current;
-    if (!map || !group || routes.length === 0) return;
+    if (!map || !group) return;
+
+    // When no routes, clear layers and reset to Pune default view
+    if (routes.length === 0) {
+      group.clearLayers();
+      fittedRouteIdRef.current = null;
+      map.setView([18.5204, 73.8567], 13, { animate: false });
+      return;
+    }
 
     void (async () => {
       const mod = await import("leaflet");

@@ -56,6 +56,7 @@ export interface PlannedRoute {
   gapAnalysis?: RouteGapAnalysis;
   factors?: FactorScoreItem[];
   hasCameraData?: boolean;
+  navigationSteps?: NavigationStep[];
 }
 
 export interface SafetyFeatures {
@@ -502,6 +503,15 @@ export function formatKm(meters: number): string {
   return `${(meters / 1000).toFixed(1)} km`;
 }
 
+export interface NavigationStep {
+  instruction: string;
+  streetName: string;
+  distanceMeters: number;
+  durationSeconds: number;
+  type: string;
+  modifier?: string;
+}
+
 export interface RawCandidate {
   id: string;
   mode: "foot" | "bike" | "car";
@@ -510,6 +520,7 @@ export interface RawCandidate {
   geometry: [number, number][];
   streetNames?: string[];
   meaningfulTurnsCount?: number;
+  navigationSteps?: NavigationStep[];
 }
 
 /**
