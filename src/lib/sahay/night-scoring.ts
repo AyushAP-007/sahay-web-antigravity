@@ -1,0 +1,515 @@
+import opening_hours from "opening_hours";
+import { haversineMeters } from "./routing.ts";
+
+export type TravelMode = "foot" | "bike" | "car";
+
+export type PlaceCategory =
+  | "shop_food"
+  | "pharmacy_medical"
+  | "hospital"
+  | "fuel_cng"
+  | "transport"
+  | "surveillance_camera";
+
+export type OpeningStatus = "open" | "closed" | "unknown";
+
+export interface MappedPlace {
+  id: string;
+  name: string;
+  category: PlaceCategory;
+  lat: number;
+  lng: number;
+  openingHoursRaw?: string;
+  weeklySchedule?: string[];
+  distanceAlongRouteMeters?: number;
+  distanceFromRouteMeters?: number;
+  estimatedPassingMinute?: number;
+  estimatedPassingTimeIso?: string;
+  openingStatus?: OpeningStatus;
+}
+
+export interface RouteGapAnalysis {
+  longestLowActivityGapMeters: number;
+  longestNoHelpPointGapMeters: number;
+  totalOpenPlaces: number;
+  totalOpenHelpPoints: number;
+  totalPlacesFound: number;
+  helpPointTypesPresent: string[];
+  distributionScore: number; // 0 to 1
+  cameraCount: number;
+  cameraDistributionScore: number; // 0 to 1
+  meaningfulTurnsCount: number;
+  mainRoadTraversedRatio: number; // 0 to 1
+}
+
+export interface FactorScoreItem {
+  id: string;
+  name: string;
+  score: number;
+  maxScore: number;
+  description: string;
+  evidence: string;
+}
+
+export interface ModeWeights {
+  openActivityPlaces: number;
+  openHelpPoints: number;
+  mainRoadCoverage: number;
+  openTransport: number;
+  fewerGaps: number;
+  fewerTurns: number;
+  cameraCoverage: number;
+}
+
+export const MODE_WEIGHTS: Record<TravelMode, ModeWeights> = {
+  car: {
+    openActivityPlaces: 25,
+    openHelpPoints: 15,
+    mainRoadCoverage: 15,
+    openTransport: 10,
+    fewerGaps: 15,
+    fewerTurns: 10,
+    cameraCoverage: 10,
+  },
+  foot: {
+    openActivityPlaces: 25,
+    openHelpPoints: 25,
+    mainRoadCoverage: 0,
+    openTransport: 10,
+    fewerGaps: 25,
+    fewerTurns: 10,
+    cameraCoverage: 5,
+  },
+  bike: {
+    openActivityPlaces: 25,
+    openHelpPoints: 20,
+    mainRoadCoverage: 10, // moderate main road/arterial access
+    openTransport: 10,
+    fewerGaps: 20,
+    fewerTurns: 10,
+    cameraCoverage: 5,
+  },
+};
+
+/**
+ * Parses OpenStreetMap opening_hours string using robust npm library for IST time.
+ */
+export function checkOpeningHoursStatus(
+  openingHoursStr: string | undefined,
+  targetDate: Date,
+  lat = 18.5204,
+  lon = 73.8567,
+): { status: OpeningStatus; weeklySchedule?: string[]; exceptionNote?: string } {
+  if (!openingHoursStr || !openingHoursStr.trim()) {
+    return { status: "unknown" };
+  }
+
+  const raw = openingHoursStr.trim();
+  if (raw === "24/7") {
+    return {
+      status: "open",
+      weeklySchedule: ["Open 24 hours every day"],
+    };
+  }
+
+  try {
+    const oh = new (opening_hours as any)(raw, {
+      lat,
+      lon,
+      address: { country_code: "in" },
+    });
+    const isOpen = oh.getState(targetDate);
+    const comment = oh.getComment(targetDate);
+
+    // Try to extract readable schedule if available
+    let weekly: string[] | undefined;
+    try {
+      const pretty = oh.prettifyValue();
+      if (pretty) {
+        weekly = pretty.split(";").map((s: string) => s.trim()).filter(Boolean);
+      }
+    } catch {
+      // ignore prettify failure
+    }
+
+    return {
+      status: isOpen ? "open" : "closed",
+      weeklySchedule: weekly,
+      exceptionNote: comment || undefined,
+    };
+  } catch {
+    // If syntax unsupported or unparseable, classify as unknown
+    return { status: "unknown" };
+  }
+}
+
+/**
+ * Projects a point onto a polyline to calculate cumulative distance along route and offset distance.
+ */
+export function projectPointOntoRoute(
+  point: [number, number],
+  geometry: [number, number][],
+): { distanceAlongRoute: number; distanceFromRoute: number } {
+  if (geometry.length === 0) {
+    return { distanceAlongRoute: 0, distanceFromRoute: 0 };
+  }
+  if (geometry.length === 1) {
+    const d = haversineMeters(point[0], point[1], geometry[0]![0], geometry[0]![1]);
+    return { distanceAlongRoute: 0, distanceFromRoute: d };
+  }
+
+  let minDistance = Number.POSITIVE_INFINITY;
+  let bestAlong = 0;
+  let cumulativeDist = 0;
+
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const p1 = geometry[i]!;
+    const p2 = geometry[i + 1]!;
+    const segLen = haversineMeters(p1[0], p1[1], p2[0], p2[1]);
+
+    // Segment projection calculation (flat earth approximation for small distances)
+    const dLat = p2[0] - p1[0];
+    const dLng = p2[1] - p1[1];
+    const segMagSq = dLat * dLat + dLng * dLng;
+
+    let t = 0;
+    if (segMagSq > 1e-12) {
+      t = ((point[0] - p1[0]) * dLat + (point[1] - p1[1]) * dLng) / segMagSq;
+      t = Math.max(0, Math.min(1, t));
+    }
+
+    const projLat = p1[0] + t * dLat;
+    const projLng = p1[1] + t * dLng;
+    const distToSeg = haversineMeters(point[0], point[1], projLat, projLng);
+
+    if (distToSeg < minDistance) {
+      minDistance = distToSeg;
+      bestAlong = cumulativeDist + t * segLen;
+    }
+
+    cumulativeDist += segLen;
+  }
+
+  return {
+    distanceAlongRoute: Math.round(bestAlong),
+    distanceFromRoute: Math.round(minDistance),
+  };
+}
+
+/**
+ * Maps place category to UI color and icon metadata.
+ */
+export function getCategoryMetadata(category: PlaceCategory): {
+  label: string;
+  color: string;
+  isHelpPoint: boolean;
+} {
+  switch (category) {
+    case "shop_food":
+      return { label: "Shops & food", color: "#eab308", isHelpPoint: false }; // yellow
+    case "pharmacy_medical":
+      return { label: "Pharmacies & clinics", color: "#ec4899", isHelpPoint: true }; // pink
+    case "hospital":
+      return { label: "Hospitals", color: "#2563eb", isHelpPoint: true }; // blue
+    case "fuel_cng":
+      return { label: "Petrol & CNG pumps", color: "#16a34a", isHelpPoint: false }; // green
+    case "transport":
+      return { label: "Transport locations", color: "#9333ea", isHelpPoint: false }; // purple
+    case "surveillance_camera":
+      return { label: "Mapped camera", color: "#475569", isHelpPoint: false }; // slate
+  }
+}
+
+/**
+ * Deduplicate mapped places by distance threshold (within 25m) and name/category.
+ */
+export function deduplicatePlaces(places: MappedPlace[], thresholdMeters = 25): MappedPlace[] {
+  const result: MappedPlace[] = [];
+  for (const place of places) {
+    const isDup = result.some((existing) => {
+      const dist = haversineMeters(existing.lat, existing.lng, place.lat, place.lng);
+      if (dist < thresholdMeters) {
+        if (existing.category === place.category) return true;
+        if (existing.name && place.name && existing.name.toLowerCase() === place.name.toLowerCase()) return true;
+      }
+      return false;
+    });
+    if (!isDup) {
+      result.push(place);
+    }
+  }
+  return result;
+}
+
+/**
+ * Calculates time-aware passing information for places along a candidate route.
+ */
+export function evaluatePlacesAlongRoute(
+  places: MappedPlace[],
+  geometry: [number, number][],
+  totalDistanceMeters: number,
+  totalDurationSeconds: number,
+  departureTime: Date,
+  maxCorridorMeters = 70,
+): MappedPlace[] {
+  if (geometry.length < 2 || totalDistanceMeters <= 0) return [];
+
+  const evaluated: MappedPlace[] = [];
+
+  for (const p of places) {
+    const proj = projectPointOntoRoute([p.lat, p.lng], geometry);
+    if (proj.distanceFromRoute <= maxCorridorMeters) {
+      const fraction = Math.min(1, Math.max(0, proj.distanceAlongRoute / totalDistanceMeters));
+      const passingSeconds = Math.round(fraction * totalDurationSeconds);
+      const passingMinute = Math.round(passingSeconds / 60);
+      const passingTime = new Date(departureTime.getTime() + passingSeconds * 1000);
+
+      const ohResult = checkOpeningHoursStatus(p.openingHoursRaw, passingTime, p.lat, p.lng);
+
+      evaluated.push({
+        ...p,
+        distanceAlongRouteMeters: proj.distanceAlongRoute,
+        distanceFromRouteMeters: proj.distanceFromRoute,
+        estimatedPassingMinute: passingMinute,
+        estimatedPassingTimeIso: passingTime.toISOString(),
+        openingStatus: ohResult.status,
+        weeklySchedule: ohResult.weeklySchedule,
+      });
+    }
+  }
+
+  // Sort by order of appearance along the route
+  evaluated.sort((a, b) => (a.distanceAlongRouteMeters ?? 0) - (b.distanceAlongRouteMeters ?? 0));
+  return evaluated;
+}
+
+/**
+ * Evaluates route distribution, gap analysis, turn counts, and camera distribution.
+ */
+export function analyzeRouteDistributionAndGaps(
+  geometry: [number, number][],
+  totalDistanceMeters: number,
+  placesAlongRoute: MappedPlace[],
+  camerasAlongRoute: MappedPlace[],
+  meaningfulTurnsCount: number,
+  mainRoadRatio: number,
+): RouteGapAnalysis {
+  // Filter confirmed open places
+  const openPlaces = placesAlongRoute.filter((p) => p.openingStatus === "open");
+  const openHelpPoints = openPlaces.filter((p) => {
+    const meta = getCategoryMetadata(p.category);
+    return meta.isHelpPoint;
+  });
+
+  const helpTypes = Array.from(new Set(openHelpPoints.map((p) => getCategoryMetadata(p.category).label)));
+
+  // Calculate gaps for all open places
+  const placePositions = [0, ...openPlaces.map((p) => p.distanceAlongRouteMeters ?? 0), totalDistanceMeters].sort((a, b) => a - b);
+  let maxActivityGap = 0;
+  for (let i = 0; i < placePositions.length - 1; i++) {
+    const gap = placePositions[i + 1]! - placePositions[i]!;
+    if (gap > maxActivityGap) maxActivityGap = gap;
+  }
+
+  // Calculate gaps for open help points
+  const helpPositions = [0, ...openHelpPoints.map((p) => p.distanceAlongRouteMeters ?? 0), totalDistanceMeters].sort((a, b) => a - b);
+  let maxHelpGap = 0;
+  for (let i = 0; i < helpPositions.length - 1; i++) {
+    const gap = helpPositions[i + 1]! - helpPositions[i]!;
+    if (gap > maxHelpGap) maxHelpGap = gap;
+  }
+
+  // Distribution score: divide route into 5 equal segments, reward open place presence across segments
+  const numSegments = 5;
+  const segLength = totalDistanceMeters / numSegments;
+  let populatedSegments = 0;
+
+  if (segLength > 0 && openPlaces.length > 0) {
+    for (let s = 0; s < numSegments; s++) {
+      const segStart = s * segLength;
+      const segEnd = (s + 1) * segLength;
+      const count = openPlaces.filter((p) => {
+        const d = p.distanceAlongRouteMeters ?? 0;
+        return d >= segStart && d < segEnd;
+      }).length;
+      if (count > 0) populatedSegments++;
+    }
+  }
+
+  const distributionScore = openPlaces.length === 0 ? 0 : populatedSegments / numSegments;
+
+  // Camera distribution in ~500m sections
+  const camera500mSections = Math.max(1, Math.ceil(totalDistanceMeters / 500));
+  let populatedCameraSections = 0;
+  for (let s = 0; s < camera500mSections; s++) {
+    const sStart = s * 500;
+    const sEnd = (s + 1) * 500;
+    const hasCam = camerasAlongRoute.some((c) => {
+      const d = c.distanceAlongRouteMeters ?? 0;
+      return d >= sStart && d < sEnd;
+    });
+    if (hasCam) populatedCameraSections++;
+  }
+  const cameraDistributionScore = camerasAlongRoute.length === 0 ? 0 : populatedCameraSections / camera500mSections;
+
+  return {
+    longestLowActivityGapMeters: Math.round(maxActivityGap),
+    longestNoHelpPointGapMeters: Math.round(maxHelpGap),
+    totalOpenPlaces: openPlaces.length,
+    totalOpenHelpPoints: openHelpPoints.length,
+    totalPlacesFound: placesAlongRoute.length,
+    helpPointTypesPresent: helpTypes,
+    distributionScore,
+    cameraCount: camerasAlongRoute.length,
+    cameraDistributionScore,
+    meaningfulTurnsCount,
+    mainRoadTraversedRatio: Math.min(1, Math.max(0, mainRoadRatio)),
+  };
+}
+
+/**
+ * Calculates transparent, mode-specific Night Activity Score (0-100) and factor breakdowns.
+ */
+export function calculateNightActivityScore(
+  analysis: RouteGapAnalysis,
+  mode: TravelMode,
+  placesAlongRoute: MappedPlace[],
+  hasCameraData: boolean,
+): {
+  nightActivityScore: number;
+  factors: FactorScoreItem[];
+  confidence: "high" | "medium" | "low";
+  missingDataNotes: string[];
+} {
+  const weights = MODE_WEIGHTS[mode];
+  const factors: FactorScoreItem[] = [];
+  const missingDataNotes: string[] = [];
+
+  // 1. Open Activity Places
+  // Density benchmark: ~1 open place per 300m for max score
+  const activityScoreRatio = Math.min(1, analysis.totalOpenPlaces / 6);
+  const activityScore = Math.round(activityScoreRatio * weights.openActivityPlaces);
+  factors.push({
+    id: "activity_places",
+    name: "Open Activity Places",
+    score: activityScore,
+    maxScore: weights.openActivityPlaces,
+    description: "Mapped shops, eateries, and commercial venues listed open at your passing time.",
+    evidence: `${analysis.totalOpenPlaces} open place${analysis.totalOpenPlaces === 1 ? "" : "s"} listed along the corridor.`,
+  });
+
+  // 2. Open Help Points
+  // Benchmark: 2+ open help points for max score
+  const helpRatio = Math.min(1, analysis.totalOpenHelpPoints / 2);
+  const helpScore = Math.round(helpRatio * weights.openHelpPoints);
+  factors.push({
+    id: "help_points",
+    name: "Open Help Points",
+    score: helpScore,
+    maxScore: weights.openHelpPoints,
+    description: "Hospitals, active clinics, and 24/7 pharmacies open along this route.",
+    evidence:
+      analysis.totalOpenHelpPoints > 0
+        ? `${analysis.totalOpenHelpPoints} open help point(s) (${analysis.helpPointTypesPresent.join(", ")}).`
+        : "No confirmed open help points mapped along this corridor.",
+  });
+
+  // 3. Main Road Coverage
+  const mainRoadScore = Math.round(analysis.mainRoadTraversedRatio * weights.mainRoadCoverage);
+  factors.push({
+    id: "main_road",
+    name: "Main-Road Prominence",
+    score: mainRoadScore,
+    maxScore: weights.mainRoadCoverage,
+    description: "Proportion of route traversing primary/secondary arterial corridors (proxy for prominence, not guaranteed lighting).",
+    evidence: `${Math.round(analysis.mainRoadTraversedRatio * 100)}% on mapped primary/arterial roads.`,
+  });
+
+  // 4. Open Transport Locations
+  const transportOpen = placesAlongRoute.filter(
+    (p) => p.category === "transport" && p.openingStatus === "open",
+  ).length;
+  const transportScoreRatio = Math.min(1, transportOpen / 2);
+  const transportScore = Math.round(transportScoreRatio * weights.openTransport);
+  factors.push({
+    id: "transport",
+    name: "Open Transport Hubs",
+    score: transportScore,
+    maxScore: weights.openTransport,
+    description: "Mapped bus stops, railway stations, or transit locations open at passing time.",
+    evidence: `${transportOpen} open transport location(s) along route.`,
+  });
+
+  // 5. Fewer Gaps (Distribution)
+  const gapScore = Math.round(analysis.distributionScore * weights.fewerGaps);
+  factors.push({
+    id: "gaps",
+    name: "Even Activity Distribution",
+    score: gapScore,
+    maxScore: weights.fewerGaps,
+    description: "Even distribution of open places with fewer long dark or unpopulated stretches.",
+    evidence: `Longest stretch without open activity: ${analysis.longestLowActivityGapMeters}m. ${Math.round(analysis.distributionScore * 100)}% segments populated.`,
+  });
+
+  // 6. Fewer Turns
+  // Optimal: 4 or fewer turns. Penalize if > 8 turns.
+  const turnRatio = Math.max(0, 1 - Math.max(0, analysis.meaningfulTurnsCount - 4) / 8);
+  const turnScore = Math.round(turnRatio * weights.fewerTurns);
+  factors.push({
+    id: "turns",
+    name: "Route Directness & Turns",
+    score: turnScore,
+    maxScore: weights.fewerTurns,
+    description: "Fewer complex turns simplify orientation and reduce isolated corner exposure.",
+    evidence: `${analysis.meaningfulTurnsCount} navigation turn(s).`,
+  });
+
+  // 7. Mapped Camera Coverage
+  let cameraScore = 0;
+  if (!hasCameraData) {
+    missingDataNotes.push("Surveillance camera data unavailable from OpenStreetMap for this corridor.");
+    factors.push({
+      id: "cameras",
+      name: "Camera Coverage",
+      score: 0,
+      maxScore: weights.cameraCoverage,
+      description: "Surveillance camera coverage mapped in OpenStreetMap.",
+      evidence: "Camera data unavailable from provider (neutral 0 pts).",
+    });
+  } else {
+    const camRatio = Math.min(1, (analysis.cameraCount / 4) * 0.5 + analysis.cameraDistributionScore * 0.5);
+    cameraScore = Math.round(camRatio * weights.cameraCoverage);
+    factors.push({
+      id: "cameras",
+      name: "Camera Coverage",
+      score: cameraScore,
+      maxScore: weights.cameraCoverage,
+      description: "OSM mapped surveillance cameras (presence does not guarantee live monitoring).",
+      evidence: `${analysis.cameraCount} mapped camera(s) across corridor.`,
+    });
+  }
+
+  // Calculate sum of factor scores
+  const totalScore = factors.reduce((acc, f) => acc + f.score, 0);
+  const clampedScore = Math.max(5, Math.min(98, totalScore));
+
+  // Confidence check
+  let unknownHoursCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
+  if (unknownHoursCount > 0) {
+    missingDataNotes.push(`${unknownHoursCount} nearby place(s) had unlisted or unparseable opening hours.`);
+  }
+
+  const confidence: "high" | "medium" | "low" =
+    hasCameraData && unknownHoursCount <= 2
+      ? "high"
+      : unknownHoursCount > 5 || !hasCameraData
+        ? "low"
+        : "medium";
+
+  return {
+    nightActivityScore: clampedScore,
+    factors,
+    confidence,
+    missingDataNotes,
+  };
+}

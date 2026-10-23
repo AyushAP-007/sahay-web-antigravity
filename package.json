@@ -16,7 +16,7 @@
     "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",
     "check:auth": "node scripts/check-auth-invariant.mjs",
-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts src/lib/sahay/profiles.test.ts src/lib/sahay/incidents.test.ts src/lib/sahay/intelligence.test.ts src/lib/sahay/pune-routing.test.ts",
+    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts src/lib/sahay/profiles.test.ts src/lib/sahay/incidents.test.ts src/lib/sahay/intelligence.test.ts src/lib/sahay/pune-routing.test.ts src/lib/sahay/night-scoring.test.ts",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
@@ -62,6 +62,7 @@
     "lightningcss": "^1.28.0",
     "lucide-react": "^0.510.0",
     "nitro": "3.0.260610-beta",
+    "opening_hours": "^3.15.0",
     "pg": "^8.16.3",
     "react": "^19.2.0",
     "react-day-picker": "^9.14.0",

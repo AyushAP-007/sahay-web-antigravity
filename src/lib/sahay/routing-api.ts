@@ -1,6 +1,15 @@
 import {
+  deduplicatePlaces,
+  evaluatePlacesAlongRoute,
+  analyzeRouteDistributionAndGaps,
+  calculateNightActivityScore,
+  type MappedPlace,
+  type TravelMode,
+} from "./night-scoring.ts";
+import {
   deduplicateRoutes,
   describeRouteFailure,
+  extractRouteFeatures,
   haversineMeters,
   rankAndCategorizeRoutes,
   type OsmContext,
@@ -11,7 +20,6 @@ import {
 
 const UA = "SahaySafetyCompanion/1.1 (college EDI prototype; Pune route planning)";
 
-// Pune geographic bounding box: latitude ~ 18.35 - 18.70, longitude ~ 73.65 - 74.05
 export const PUNE_BOUNDS = {
   minLat: 18.35,
   maxLat: 18.7,
@@ -56,7 +64,7 @@ async function fetchJson<T>(
 export async function searchPlaces(input: {
   data: { query: string };
 }): Promise<PlaceHit[]> {
-  const query = input.data.query.trim().slice(0, 80);
+  const query = input.data.query.trim();
   if (query.length < 2) return [];
 
   // Search biased toward central Pune
@@ -80,7 +88,6 @@ export async function searchPlaces(input: {
         const [lng, lat] = feature.geometry?.coordinates ?? [];
         if (typeof lat !== "number" || typeof lng !== "number") return null;
 
-        // Bias results in or around Pune
         const isPuneArea = isWithinPune(lat, lng);
         const state = feature.properties?.state ?? "";
         if (!isPuneArea && state && !state.toLowerCase().includes("maharashtra")) {
@@ -119,52 +126,86 @@ export async function searchPlaces(input: {
       lat: parseFloat(item.lat),
       lng: parseFloat(item.lon),
     }));
-  } catch {
+  } catch (err) {
+    console.warn("Nominatim search failed:", err);
     return [];
   }
 }
 
 interface OsrmStep {
-  name: string;
-  distance: number;
-  duration: number;
+  name?: string;
+  maneuver?: {
+    type?: string;
+    modifier?: string;
+  };
+}
+
+interface OsrmLeg {
+  steps?: OsrmStep[];
 }
 
 interface OsrmRoute {
   distance: number;
   duration: number;
-  geometry?: { coordinates?: number[][] };
-  legs?: Array<{
-    steps?: OsrmStep[];
-  }>;
+  geometry?: {
+    coordinates?: [number, number][];
+  };
+  legs?: OsrmLeg[];
 }
 
 function extractStreetNames(route: OsrmRoute): string[] {
-  const names = new Set<string>();
+  const names: string[] = [];
+  const seen = new Set<string>();
   for (const leg of route.legs ?? []) {
     for (const step of leg.steps ?? []) {
-      if (step.name && step.name.trim().length > 1) {
-        names.add(step.name.trim());
+      const name = step.name?.trim();
+      if (name && !seen.has(name) && !name.toLowerCase().startsWith("unnamed")) {
+        seen.add(name);
+        names.push(name);
       }
     }
   }
-  return Array.from(names);
+  return names;
+}
+
+function countMeaningfulTurns(route: OsrmRoute): number {
+  let count = 0;
+  for (const leg of route.legs ?? []) {
+    for (const step of leg.steps ?? []) {
+      const type = step.maneuver?.type;
+      const mod = step.maneuver?.modifier;
+      if (
+        type === "turn" ||
+        type === "end of road" ||
+        type === "fork" ||
+        type === "roundabout" ||
+        (mod && (mod.includes("left") || mod.includes("right") || mod.includes("sharp")))
+      ) {
+        count++;
+      }
+    }
+  }
+  return count;
 }
 
 /**
- * Multi-path candidate generator for Pune.
- * Calls OSRM walking engine with alternatives=true and waypoint diversions
- * to discover 3-5 genuinely distinct valid walking routes.
+ * Fetches real candidate routes using mode-specific OSRM routers (foot, bike, or car).
  */
-export async function fetchMultiPathWalkingRoutes(
+export async function fetchMultiPathRoutes(
   from: PlaceHit,
   to: PlaceHit,
+  mode: TravelMode = "foot",
 ): Promise<RawCandidate[]> {
-  const host = "https://routing.openstreetmap.de/routed-foot";
-  const directPath = `${from.lng},${from.lat};${to.lng},${to.lat}`;
-  const directUrl = `${host}/route/v1/driving/${directPath}?alternatives=true&overview=full&geometries=geojson&steps=true`;
-
   const candidates: RawCandidate[] = [];
+
+  const hostMap: Record<TravelMode, string> = {
+    foot: "https://routing.openstreetmap.de/routed-foot",
+    bike: "https://routing.openstreetmap.de/routed-bike",
+    car: "https://routing.openstreetmap.de/routed-car",
+  };
+  const host = hostMap[mode] || hostMap.foot;
+
+  const directUrl = `${host}/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`;
 
   try {
     const payload = await fetchJson<{ code?: string; routes?: OsrmRoute[] }>(
@@ -178,13 +219,14 @@ export async function fetchMultiPathWalkingRoutes(
         if (!route.geometry?.coordinates || route.geometry.coordinates.length < 2) return;
         candidates.push({
           id: `direct-${idx}`,
-          mode: "foot",
+          mode,
           distanceMeters: route.distance,
           durationSeconds: route.duration,
           geometry: route.geometry.coordinates.map(
             (pair) => [pair[1]!, pair[0]!] as [number, number],
           ),
           streetNames: extractStreetNames(route),
+          meaningfulTurnsCount: countMeaningfulTurns(route),
         });
       });
     }
@@ -192,21 +234,16 @@ export async function fetchMultiPathWalkingRoutes(
     console.warn("Direct OSRM route fetch failed:", err);
   }
 
-  // If direct routing gave fewer than 4 routes, synthesize orthogonal waypoint diversions
-  // through real Pune street nodes to discover alternative arterial corridors
+  // Waypoint diversion for alternative arterial corridors if fewer than 4 routes found
   const straightDist = haversineMeters(from.lat, from.lng, to.lat, to.lng);
   if (candidates.length < 5 && straightDist > 250) {
-    // Vector between from and to
     const midLat = (from.lat + to.lat) / 2;
     const midLng = (from.lng + to.lng) / 2;
     const dLat = to.lat - from.lat;
     const dLng = to.lng - from.lng;
 
-    // Normal vectors (perpendicular offsets left and right)
-    // Scale offset between 200m and 600m depending on journey distance
-    const offsetFactor = Math.min(0.007, Math.max(0.0025, straightDist / 6371000 * 0.7));
+    const offsetFactor = Math.min(0.007, Math.max(0.0025, (straightDist / 6371000) * 0.7));
 
-    // Two lateral diversion waypoints
     const waypointLeft = {
       lat: midLat - dLng * 0.45 + (dLng > 0 ? offsetFactor : -offsetFactor),
       lng: midLng + dLat * 0.45 + (dLat > 0 ? offsetFactor : -offsetFactor),
@@ -234,18 +271,19 @@ export async function fetchMultiPathWalkingRoutes(
           if (r.distance < straightDist * 2.2 && r.geometry?.coordinates) {
             candidates.push({
               id: `via-${i}`,
-              mode: "foot",
+              mode,
               distanceMeters: r.distance,
               durationSeconds: r.duration,
               geometry: r.geometry.coordinates.map(
                 (pair) => [pair[1]!, pair[0]!] as [number, number],
               ),
               streetNames: extractStreetNames(r),
+              meaningfulTurnsCount: countMeaningfulTurns(r),
             });
           }
         }
       } catch {
-        // Diversion route not found or unreachable, continue
+        // Diversion route unreachable
       }
     }
   }
@@ -253,95 +291,320 @@ export async function fetchMultiPathWalkingRoutes(
   return deduplicateRoutes(candidates);
 }
 
+// Backward-compatible alias
+export const fetchMultiPathWalkingRoutes = (from: PlaceHit, to: PlaceHit) =>
+  fetchMultiPathRoutes(from, to, "foot");
+
 /**
- * Loads rich Pune OSM context covering police stations, hospitals, 24/7 pharmacies,
- * commercial shop density, and transit stops along all candidate geometries.
+ * Loads rich categorized places along candidate routes.
  */
-export async function loadPuneOsmContext(
+export async function loadPuneCategorizedPlaces(
   geometries: Array<[number, number][]>,
-): Promise<OsmContext> {
-  const empty: OsmContext = { lamps: [], amenities: [], lampsKnown: false };
+): Promise<{ places: MappedPlace[]; cameras: MappedPlace[]; camerasAvailable: boolean }> {
   const allPoints = geometries.flat();
-  if (allPoints.length < 2) return empty;
+  if (allPoints.length < 2) {
+    return { places: [], cameras: [], camerasAvailable: false };
+  }
 
   const lats = allPoints.map((p) => p[0]);
   const lngs = allPoints.map((p) => p[1]);
-  const south = Math.min(...lats) - 0.008;
-  const north = Math.max(...lats) + 0.008;
-  const west = Math.min(...lngs) - 0.008;
-  const east = Math.max(...lngs) + 0.008;
+  const south = Math.min(...lats) - 0.01;
+  const north = Math.max(...lats) + 0.01;
+  const west = Math.min(...lngs) - 0.01;
+  const east = Math.max(...lngs) + 0.01;
 
   const centerLat = (south + north) / 2;
   const centerLng = (west + east) / 2;
 
-  // Categories to query: police, hospital, pharmacy, shop, bus_stop
-  const tags: Array<{ kind: string; query: string; osmTag: string }> = [
-    { kind: "police", query: "police", osmTag: "amenity:police" },
-    { kind: "hospital", query: "hospital", osmTag: "amenity:hospital" },
-    { kind: "pharmacy", query: "pharmacy", osmTag: "amenity:pharmacy" },
-    { kind: "transit", query: "bus_stop", osmTag: "highway:bus_stop" },
-    { kind: "commercial", query: "shop", osmTag: "shop" },
+  const categoryQueries = [
+    { cat: "shop_food" as const, query: "shop", osmTag: "shop" },
+    { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
+    { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
+    { cat: "pharmacy_medical" as const, query: "clinic", osmTag: "amenity:clinic" },
+    { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
+    { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
+    { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
+    { cat: "transport" as const, query: "railway", osmTag: "railway:station" },
   ];
 
-  const results = await Promise.all(
-    tags.map(async (t) => {
+  const fetchedPlaces: MappedPlace[] = [];
+
+  await Promise.all(
+    categoryQueries.map(async (cq, idx) => {
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(t.query)}&lat=${centerLat}&lon=${centerLng}&limit=25&osm_tag=${encodeURIComponent(t.osmTag)}`;
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=30&osm_tag=${encodeURIComponent(cq.osmTag)}`;
         const payload = await fetchJson<{
           features?: Array<{
             geometry?: { coordinates?: number[] };
-            properties?: { name?: string };
+            properties?: {
+              name?: string;
+              osm_id?: number;
+              opening_hours?: string;
+              [k: string]: any;
+            };
           }>;
         }>(url, {}, 8000);
 
-        const items: Array<{ lat: number; lng: number; kind: string; name?: string }> = [];
         for (const f of payload.features ?? []) {
           const [lng, lat] = f.geometry?.coordinates ?? [];
           if (typeof lat !== "number" || typeof lng !== "number") continue;
           if (lat < south || lat > north || lng < west || lng > east) continue;
-          items.push({
+
+          // Default hours heuristic for standard Indian amenities if tag missing
+          let rawHours = f.properties?.opening_hours;
+          if (!rawHours) {
+            if (cq.cat === "hospital") {
+              rawHours = "24/7"; // Hospitals operate 24/7 in Pune
+            } else if (cq.cat === "shop_food") {
+              rawHours = "Mo-Su 10:00-23:00"; // Common shop/restaurant schedule
+            } else if (cq.cat === "fuel_cng") {
+              rawHours = "Mo-Su 06:00-23:00";
+            } else if (cq.cat === "transport") {
+              rawHours = "Mo-Su 05:00-23:30";
+            }
+          }
+
+          fetchedPlaces.push({
+            id: `place-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
+            name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
+            category: cq.cat,
             lat,
             lng,
-            kind: t.kind,
-            name: f.properties?.name,
+            openingHoursRaw: rawHours,
           });
         }
-        return items;
       } catch {
-        return [];
+        // Continue
       }
     }),
   );
 
+  const deduplicated = deduplicatePlaces(fetchedPlaces);
+
+  // Check Overpass for live surveillance cameras
+  let cameras: MappedPlace[] = [];
+  let camerasAvailable = false;
+
+  const overpassQuery = `[out:json][timeout:6];node["man_made"="surveillance"](${south.toFixed(4)},${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)});out body 25;`;
+  try {
+    const ovRes = await fetchJson<{
+      elements?: Array<{ id: number; lat: number; lon: number; tags?: any }>;
+    }>("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": UA,
+      },
+      body: `data=${encodeURIComponent(overpassQuery)}`,
+    }, 6000);
+
+    if (ovRes.elements) {
+      camerasAvailable = true;
+      cameras = ovRes.elements.map((el) => ({
+        id: `cam-${el.id}`,
+        name: el.tags?.name || "OSM Surveillance Camera",
+        category: "surveillance_camera" as const,
+        lat: el.lat,
+        lng: el.lon,
+      }));
+    }
+  } catch {
+    // If Overpass is rate-limited or unavailable, record camera data as unavailable
+    camerasAvailable = false;
+  }
+
   return {
-    lamps: [],
-    amenities: results.flat(),
-    lampsKnown: false, // Explicitly false so missing streetlight data is handled by policy
+    places: deduplicated,
+    cameras,
+    camerasAvailable,
   };
 }
 
+/**
+ * Loads Pune OSM context for backward compatibility.
+ */
+export async function loadPuneOsmContext(
+  geometries: Array<[number, number][]>,
+): Promise<OsmContext> {
+  const { places } = await loadPuneCategorizedPlaces(geometries);
+  return {
+    lamps: [],
+    amenities: places.map((p) => ({
+      lat: p.lat,
+      lng: p.lng,
+      kind: p.category === "pharmacy_medical" ? "pharmacy" : p.category === "shop_food" ? "commercial" : p.category,
+      name: p.name,
+    })),
+    lampsKnown: false,
+  };
+}
+
+/**
+ * Plan safe routes with time-aware Night Activity scoring and multi-mode comparison.
+ */
 export async function planSafeRoutes(input: {
-  data: { from: PlaceHit; to: PlaceHit; hour: number };
-}): Promise<{ routes: PlannedRoute[]; note: string }> {
-  const { from, to, hour } = input.data;
+  data: {
+    from: PlaceHit;
+    to: PlaceHit;
+    hour?: number;
+    mode?: TravelMode;
+    departureTimeIso?: string;
+  };
+}): Promise<{ routes: PlannedRoute[]; note: string; allPlaces: MappedPlace[]; allCameras: MappedPlace[] }> {
+  const { from, to, mode = "foot", departureTimeIso } = input.data;
 
-  // Pune check
-  const fromInPune = isWithinPune(from.lat, from.lng);
-  const toInPune = isWithinPune(to.lat, to.lng);
+  const departureDate = departureTimeIso ? new Date(departureTimeIso) : new Date();
+  const hour = input.data.hour ?? departureDate.getHours();
 
-  if (!fromInPune || !toInPune) {
-    console.warn("Route planning requested outside Pune bounding box:", from, to);
-  }
-
-  const rawCandidates = await fetchMultiPathWalkingRoutes(from, to);
+  const rawCandidates = await fetchMultiPathRoutes(from, to, mode);
   if (rawCandidates.length === 0) {
     throw new Error(describeRouteFailure("none"));
   }
 
-  const osmContext = await loadPuneOsmContext(
+  const { places, cameras, camerasAvailable } = await loadPuneCategorizedPlaces(
     rawCandidates.map((c) => c.geometry),
   );
 
-  const ranked = rankAndCategorizeRoutes(rawCandidates, osmContext, hour);
-  return ranked;
+  // Legacy baseline ranking
+  const legacyOsm: OsmContext = {
+    lamps: [],
+    amenities: places.map((p) => ({
+      lat: p.lat,
+      lng: p.lng,
+      kind: p.category === "pharmacy_medical" ? "pharmacy" : p.category,
+      name: p.name,
+    })),
+    lampsKnown: false,
+  };
+
+  const rankedBase = rankAndCategorizeRoutes(rawCandidates, legacyOsm, hour);
+  const shortestMeters = Math.min(...rawCandidates.map((c) => c.distanceMeters));
+  const fastestDuration = Math.min(...rawCandidates.map((c) => c.durationSeconds));
+
+  // Calculate Night Activity Score and time-aware passing for each candidate
+  const enhancedRoutes: PlannedRoute[] = rankedBase.routes.map((route) => {
+    // 1. Evaluate places along this specific route
+    const placesAlong = evaluatePlacesAlongRoute(
+      places,
+      route.geometry,
+      route.distanceMeters,
+      route.durationSeconds,
+      departureDate,
+      70, // 70m corridor
+    );
+
+    // 2. Evaluate cameras along this route
+    const camerasAlong = evaluatePlacesAlongRoute(
+      cameras,
+      route.geometry,
+      route.distanceMeters,
+      route.durationSeconds,
+      departureDate,
+      60, // 60m corridor
+    );
+
+    // 3. Gap analysis & distribution
+    const rawMatch = rawCandidates.find((c) => c.id === route.id);
+    const turns = rawMatch?.meaningfulTurnsCount ?? 3;
+    const mainRoadRatio = route.breakdown?.pedestrianScore ? route.breakdown.pedestrianScore / 100 : 0.4;
+
+    const gapAnalysis = analyzeRouteDistributionAndGaps(
+      route.geometry,
+      route.distanceMeters,
+      placesAlong,
+      camerasAlong,
+      turns,
+      mainRoadRatio,
+    );
+
+    // 4. Night Activity Score
+    const scoring = calculateNightActivityScore(
+      gapAnalysis,
+      mode,
+      placesAlong,
+      camerasAvailable,
+    );
+
+    return {
+      ...route,
+      nightActivityScore: scoring.nightActivityScore,
+      factors: scoring.factors,
+      gapAnalysis,
+      placesAlongRoute: placesAlong,
+      camerasAlongRoute: camerasAlong,
+      hasCameraData: camerasAvailable,
+      missingDataNotes: [
+        ...(route.missingDataNotes ?? []),
+        ...scoring.missingDataNotes,
+      ],
+      confidence: scoring.confidence,
+    };
+  });
+
+  // Apply Section 10: Fastest vs Night-Activity-Favoured comparison
+  // 1. Fastest candidate
+  let fastestIndex = 0;
+  enhancedRoutes.forEach((r, idx) => {
+    if (r.durationSeconds < enhancedRoutes[fastestIndex]!.durationSeconds) {
+      fastestIndex = idx;
+    }
+  });
+
+  // 2. Night activity-favoured candidate within 10-minute constraint of fastest
+  const fastestDurationSec = enhancedRoutes[fastestIndex]!.durationSeconds;
+  const maxAllowedDurationSec = fastestDurationSec + 10 * 60; // 10 minutes constraint
+
+  let bestActivityIndex = -1;
+  let bestScore = -Infinity;
+
+  enhancedRoutes.forEach((r, idx) => {
+    const isWithin10Min = r.durationSeconds <= maxAllowedDurationSec;
+    const score = r.nightActivityScore ?? r.safetyScore;
+    if (isWithin10Min && score > bestScore) {
+      bestScore = score;
+      bestActivityIndex = idx;
+    }
+  });
+
+  if (bestActivityIndex === -1) {
+    bestActivityIndex = fastestIndex;
+  }
+
+  // Label the candidates honestly
+  enhancedRoutes.forEach((r, idx) => {
+    if (idx === fastestIndex && idx === bestActivityIndex) {
+      r.objective = "recommended";
+      r.objectiveLabel = "Recommended activity route (also fastest)";
+      r.kind = "safest";
+    } else if (idx === bestActivityIndex) {
+      r.objective = "safety-focused";
+      r.objectiveLabel = "Night activity-favoured";
+      r.kind = "safest";
+    } else if (idx === fastestIndex) {
+      r.objective = "fastest";
+      r.objectiveLabel = "Fastest";
+      r.kind = "shortest";
+    } else {
+      r.objectiveLabel = `Alternative ${mode}`;
+    }
+  });
+
+  // Sort so Recommended / Night activity-favoured is first, then Fastest, then others
+  enhancedRoutes.sort((a, b) => {
+    if (a.objectiveLabel?.includes("Recommended") || a.objectiveLabel?.includes("Night activity-favoured")) return -1;
+    if (b.objectiveLabel?.includes("Recommended") || b.objectiveLabel?.includes("Night activity-favoured")) return 1;
+    if (a.objective === "fastest") return -1;
+    if (b.objective === "fastest") return 1;
+    return (b.nightActivityScore ?? b.safetyScore) - (a.nightActivityScore ?? a.safetyScore);
+  });
+
+  const count = enhancedRoutes.length;
+  const note = `Compared ${count} distinct ${mode} route option(s) in Pune for departure at ${departureDate.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}.`;
+
+  return {
+    routes: enhancedRoutes,
+    note,
+    allPlaces: places,
+    allCameras: cameras,
+  };
 }

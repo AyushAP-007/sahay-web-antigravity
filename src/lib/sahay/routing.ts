@@ -1,3 +1,10 @@
+import type {
+  FactorScoreItem,
+  MappedPlace,
+  RouteGapAnalysis,
+  TravelMode,
+} from "./night-scoring";
+
 export interface PlaceHit {
   label: string;
   lat: number;
@@ -30,10 +37,11 @@ export interface PlannedRoute {
   kind: RouteKind;
   objective?: RouteObjective;
   objectiveLabel?: string;
-  mode: "foot" | "bike";
+  mode: "foot" | "bike" | "car";
   distanceMeters: number;
   durationSeconds: number;
   safetyScore: number;
+  nightActivityScore?: number;
   confidence?: "high" | "medium" | "low";
   detourMeters?: number;
   reasons: string[];
@@ -42,6 +50,12 @@ export interface PlannedRoute {
   geometry: [number, number][];
   breakdown?: RouteFeatureBreakdown;
   traversedStreets?: string[];
+  // NightWise-inspired attributes
+  placesAlongRoute?: MappedPlace[];
+  camerasAlongRoute?: MappedPlace[];
+  gapAnalysis?: RouteGapAnalysis;
+  factors?: FactorScoreItem[];
+  hasCameraData?: boolean;
 }
 
 export interface SafetyFeatures {
@@ -490,11 +504,12 @@ export function formatKm(meters: number): string {
 
 export interface RawCandidate {
   id: string;
-  mode: "foot" | "bike";
+  mode: "foot" | "bike" | "car";
   distanceMeters: number;
   durationSeconds: number;
   geometry: [number, number][];
   streetNames?: string[];
+  meaningfulTurnsCount?: number;
 }
 
 /**
