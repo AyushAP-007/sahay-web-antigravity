@@ -410,6 +410,7 @@ export async function loadPuneCategorizedPlaces(
   const viewboxStr = `${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)},${south.toFixed(4)}`;
 
   const nominatimQueries = [
+    { cat: "police" as const, q: "police station" },
     { cat: "hospital" as const, q: "hospital" },
     { cat: "pharmacy_medical" as const, q: "pharmacy" },
     { cat: "pharmacy_medical" as const, q: "clinic" },
@@ -459,7 +460,7 @@ export async function loadPuneCategorizedPlaces(
 
           // Default schedule if untagged
           if (!rawHours) {
-            if (nq.cat === "hospital") {
+            if (nq.cat === "hospital" || nq.cat === "police") {
               rawHours = "24/7";
             } else if (nq.cat === "shop_food") {
               rawHours = "Mo-Su 10:00-23:00";
@@ -488,6 +489,7 @@ export async function loadPuneCategorizedPlaces(
   // If Nominatim yielded places, deduplicate them; otherwise try Photon fallback
   if (fetchedPlaces.length === 0) {
     const categoryQueries = [
+      { cat: "police" as const, query: "police", osmTag: "amenity:police" },
       { cat: "shop_food" as const, query: "shop", osmTag: "shop" },
       { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
       { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
@@ -518,7 +520,7 @@ export async function loadPuneCategorizedPlaces(
             if (lat < south || lat > north || lng < west || lng > east) continue;
 
             let rawHours = f.properties?.opening_hours;
-            if (!rawHours && cq.cat === "hospital") rawHours = "24/7";
+            if (!rawHours && (cq.cat === "hospital" || cq.cat === "police")) rawHours = "24/7";
 
             fetchedPlaces.push({
               id: `photon-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,

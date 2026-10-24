@@ -211,6 +211,7 @@ function Planner({
     shopFood: true,
     medical: true,
     hospital: true,
+    police: true,
     fuel: true,
     transport: true,
     cameras: true,
@@ -416,6 +417,7 @@ function Planner({
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#eab308]" /> Shops & Food</span>
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#ec4899]" /> Pharmacies & Clinics</span>
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#2563eb]" /> Hospitals (24/7)</span>
+              <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#0284c7]" /> Police Stations (24/7)</span>
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#16a34a]" /> Petrol & CNG Pumps</span>
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#9333ea]" /> Transport Hubs</span>
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#475569]" /> Surveillance Cameras</span>
@@ -585,6 +587,14 @@ function Planner({
                 onChange={(e) => setLayers({ ...layers, hospital: e.target.checked })}
               />
               <span className="size-2 rounded-full bg-[#2563eb]" /> Hospitals
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={layers.police}
+                onChange={(e) => setLayers({ ...layers, police: e.target.checked })}
+              />
+              <span className="size-2 rounded-full bg-[#0284c7]" /> Police
             </label>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input

@@ -7,6 +7,7 @@ export type PlaceCategory =
   | "shop_food"
   | "pharmacy_medical"
   | "hospital"
+  | "police"
   | "fuel_cng"
   | "transport"
   | "surveillance_camera";
@@ -211,6 +212,8 @@ export function getCategoryMetadata(category: PlaceCategory): {
       return { label: "Pharmacies & clinics", color: "#ec4899", isHelpPoint: true }; // pink
     case "hospital":
       return { label: "Hospitals", color: "#2563eb", isHelpPoint: true }; // blue
+    case "police":
+      return { label: "Police stations", color: "#0284c7", isHelpPoint: true }; // ocean blue
     case "fuel_cng":
       return { label: "Petrol & CNG pumps", color: "#16a34a", isHelpPoint: false }; // green
     case "transport":

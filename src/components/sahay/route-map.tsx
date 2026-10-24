@@ -6,6 +6,7 @@ export interface LayerVisibility {
   shopFood: boolean;
   medical: boolean;
   hospital: boolean;
+  police: boolean;
   fuel: boolean;
   transport: boolean;
   cameras: boolean;
@@ -20,6 +21,7 @@ export function RouteMap({
     shopFood: true,
     medical: true,
     hospital: true,
+    police: true,
     fuel: true,
     transport: true,
     cameras: true,
@@ -144,6 +146,7 @@ export function RouteMap({
         if (p.category === "shop_food" && layers.shopFood) visible = true;
         if (p.category === "pharmacy_medical" && layers.medical) visible = true;
         if (p.category === "hospital" && layers.hospital) visible = true;
+        if (p.category === "police" && layers.police) visible = true;
         if (p.category === "fuel_cng" && layers.fuel) visible = true;
         if (p.category === "transport" && layers.transport) visible = true;
 
@@ -158,7 +161,7 @@ export function RouteMap({
                 : "Hours UNKNOWN";
 
           const marker = L.circleMarker([p.lat, p.lng], {
-            radius: p.category === "hospital" ? 7 : 5,
+            radius: p.category === "hospital" || p.category === "police" ? 7 : 5,
             color: meta.color,
             fillColor: meta.color,
             fillOpacity: isOpen ? 0.95 : 0.45,
