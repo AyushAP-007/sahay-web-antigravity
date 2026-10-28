@@ -30,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSahay } from "@/lib/sahay/context";
-import { planSafeRoutes, searchPlaces } from "@/lib/sahay/routing-api";
+import { isWithinPune, planSafeRoutes, searchPlaces } from "@/lib/sahay/routing-api";
 import { countdownLabel } from "@/lib/sahay/safety";
 import {
   formatKm,
@@ -130,6 +130,47 @@ function JourneyScreen() {
             </span>
             <span className="ml-auto text-muted-fg">{remaining}</span>
           </div>
+
+          {/* Foreground GPS deviation watch control */}
+          <div className="flex flex-col gap-2 rounded-2xl border border-border/80 bg-card/80 p-3 text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <LocateFixed
+                  className={`size-4 ${
+                    active.locationWatchRequested ? "text-primary animate-pulse" : "text-muted-fg"
+                  }`}
+                />
+                <span className="font-semibold text-fg">Foreground GPS Deviation Watch</span>
+              </div>
+              <Button
+                size="compact"
+                variant={active.locationWatchRequested ? "outline" : "default"}
+                onClick={() => setJourneyLocationWatch(!active.locationWatchRequested)}
+              >
+                {active.locationWatchRequested ? "Turn off watch" : "Enable GPS watch"}
+              </Button>
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-fg">
+              Status:{" "}
+              <strong
+                className={
+                  active.locationWatchRequested
+                    ? active.liveOffRoute
+                      ? "text-danger"
+                      : "text-primary"
+                    : "text-muted-fg"
+                }
+              >
+                {active.locationWatchRequested
+                  ? active.liveOffRoute
+                    ? "Deviating from corridor"
+                    : "Active in foreground"
+                  : "Off (no tracking)"}
+              </strong>
+              {active.locationWatchNote ? ` — ${active.locationWatchNote}` : ""}
+            </p>
+          </div>
+
           <div className="flex flex-wrap gap-2">
             <Button
               size="compact"
@@ -275,6 +316,12 @@ function Planner({
       const location = await requestLocation();
       if (!location.available || location.latitude === null || location.longitude === null) {
         setError(location.message ?? "Phone location is not available.");
+        return;
+      }
+      if (!isWithinPune(location.latitude, location.longitude)) {
+        setError(
+          `Current GPS location (${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}) is outside the supported Pune region. Please choose a start point within Pune.`,
+        );
         return;
       }
       const place: PlaceHit = {

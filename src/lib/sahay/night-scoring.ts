@@ -33,6 +33,7 @@ export interface RouteGapAnalysis {
   longestLowActivityGapMeters: number;
   longestNoHelpPointGapMeters: number;
   totalOpenPlaces: number;
+  totalOpenCommercial: number;
   totalOpenHelpPoints: number;
   totalPlacesFound: number;
   helpPointTypesPresent: string[];
@@ -119,6 +120,14 @@ export function checkOpeningHoursStatus(
       lon,
       address: { country_code: "in" },
     });
+    // Check if the library marks this time/date as explicitly unknown
+    if (typeof oh.getUnknown === "function" && oh.getUnknown(targetDate)) {
+      return {
+        status: "unknown",
+        exceptionNote: "Opening hours are explicitly unknown or variable at this time.",
+      };
+    }
+
     const isOpen = oh.getState(targetDate);
     const comment = oh.getComment(targetDate);
 
@@ -299,6 +308,7 @@ export function analyzeRouteDistributionAndGaps(
 ): RouteGapAnalysis {
   // Filter confirmed open places
   const openPlaces = placesAlongRoute.filter((p) => p.openingStatus === "open");
+  const openCommercial = openPlaces.filter((p) => p.category === "shop_food");
   const openHelpPoints = openPlaces.filter((p) => {
     const meta = getCategoryMetadata(p.category);
     return meta.isHelpPoint;
@@ -359,6 +369,7 @@ export function analyzeRouteDistributionAndGaps(
     longestLowActivityGapMeters: Math.round(maxActivityGap),
     longestNoHelpPointGapMeters: Math.round(maxHelpGap),
     totalOpenPlaces: openPlaces.length,
+    totalOpenCommercial: openCommercial.length,
     totalOpenHelpPoints: openHelpPoints.length,
     totalPlacesFound: placesAlongRoute.length,
     helpPointTypesPresent: helpTypes,
@@ -418,16 +429,17 @@ export function calculateNightActivityScore(
     weights.openActivityPlaces += 100 - currentSum;
   }
 
-  // 1. Open Activity Places
-  const activityScoreRatio = Math.min(1, analysis.totalOpenPlaces / 6);
+  // 1. Open Activity Places (Commercial venues: shops, food, dining)
+  const commercialCount = analysis.totalOpenCommercial;
+  const activityScoreRatio = Math.min(1, commercialCount / 5);
   const activityScore = Math.round(activityScoreRatio * weights.openActivityPlaces);
   factors.push({
     id: "activity_places",
-    name: "Open Activity Places",
+    name: "Open Commercial Places",
     score: activityScore,
     maxScore: weights.openActivityPlaces,
     description: "Mapped shops, eateries, and commercial venues listed open at your passing time.",
-    evidence: `${analysis.totalOpenPlaces} open place${analysis.totalOpenPlaces === 1 ? "" : "s"} listed along the corridor.`,
+    evidence: `${commercialCount} open commercial venue${commercialCount === 1 ? "" : "s"} listed along the corridor.`,
   });
 
   // 2. Open Help Points
@@ -539,10 +551,18 @@ export function calculateNightActivityScore(
         ? "low"
         : "medium";
 
-  return {
-    nightActivityScore: clampedScore,
-    factors,
-    confidence,
-    missingDataNotes,
-  };
+    if (hasCameraData) {
+      if (analysis.cameraCount === 0) {
+        missingDataNotes.push("Zero surveillance cameras mapped in OpenStreetMap along this route; actual street coverage may be unmapped.");
+      } else {
+        missingDataNotes.push("Mapped cameras indicate OSM records only; live recording, maintenance, or monitoring is not guaranteed.");
+      }
+    }
+
+    return {
+      nightActivityScore: clampedScore,
+      factors,
+      confidence,
+      missingDataNotes,
+    };
 }

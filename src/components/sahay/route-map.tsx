@@ -58,7 +58,7 @@ export function RouteMap({
       }).setView(initialCenter, 13);
 
       L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap",
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
         maxZoom: 18,
       }).addTo(map);
 
@@ -136,10 +136,8 @@ export function RouteMap({
       }
 
       // 2. Render Categorized Place Markers along route
-      const placesToRender =
-        selected.placesAlongRoute && selected.placesAlongRoute.length > 0
-          ? selected.placesAlongRoute
-          : places;
+      // Only render places if the selected route has them or if places explicitly supplied
+      const placesToRender = selected.placesAlongRoute ?? places;
 
       for (const p of placesToRender) {
         let visible = false;
@@ -168,26 +166,45 @@ export function RouteMap({
             weight: 2,
           });
 
-          marker.bindPopup(`
-            <div style="font-family: sans-serif; font-size: 12px; line-height: 1.4;">
-              <strong style="color: ${meta.color};">${meta.label}</strong><br/>
-              <b>${p.name}</b><br/>
-              <span style="font-weight: 600; color: ${isOpen ? "#16a34a" : p.openingStatus === "closed" ? "#dc2626" : "#64748b"};">
-                ● ${statusText}
-              </span>
-              ${p.estimatedPassingMinute !== undefined ? `<br/><span style="color:#64748b;">Pass ~${p.estimatedPassingMinute}m into journey</span>` : ""}
-            </div>
-          `);
+          // Safe popup text construction
+          const container = document.createElement("div");
+          container.style.fontFamily = "sans-serif";
+          container.style.fontSize = "12px";
+          container.style.lineHeight = "1.4";
+
+          const header = document.createElement("strong");
+          header.style.color = meta.color;
+          header.textContent = meta.label;
+          container.appendChild(header);
+          container.appendChild(document.createElement("br"));
+
+          const nameEl = document.createElement("b");
+          nameEl.textContent = p.name;
+          container.appendChild(nameEl);
+          container.appendChild(document.createElement("br"));
+
+          const statusSpan = document.createElement("span");
+          statusSpan.style.fontWeight = "600";
+          statusSpan.style.color = isOpen ? "#10b981" : p.openingStatus === "closed" ? "#f43f5e" : "#8b9bb0";
+          statusSpan.textContent = `● ${statusText}`;
+          container.appendChild(statusSpan);
+
+          if (p.estimatedPassingMinute !== undefined) {
+            container.appendChild(document.createElement("br"));
+            const passSpan = document.createElement("span");
+            passSpan.style.color = "#8b9bb0";
+            passSpan.textContent = `Pass ~${p.estimatedPassingMinute}m into journey`;
+            container.appendChild(passSpan);
+          }
+
+          marker.bindPopup(container);
           group.addLayer(marker);
         }
       }
 
       // 3. Render Cameras along route
       if (layers.cameras) {
-        const camsToRender =
-          selected.camerasAlongRoute && selected.camerasAlongRoute.length > 0
-            ? selected.camerasAlongRoute
-            : cameras;
+        const camsToRender = selected.camerasAlongRoute ?? cameras;
 
         for (const cam of camsToRender) {
           const camMarker = L.circleMarker([cam.lat, cam.lng], {
@@ -198,12 +215,21 @@ export function RouteMap({
             weight: 2,
           });
 
-          camMarker.bindPopup(`
-            <div style="font-family: sans-serif; font-size: 12px;">
-              <strong>📷 Mapped Surveillance Camera</strong><br/>
-              <span style="color: #64748b;">Mapped on OpenStreetMap.<br/>Note: Live recording/monitoring not guaranteed.</span>
-            </div>
-          `);
+          const camContainer = document.createElement("div");
+          camContainer.style.fontFamily = "sans-serif";
+          camContainer.style.fontSize = "12px";
+
+          const camHeader = document.createElement("strong");
+          camHeader.textContent = "📷 Mapped Surveillance Camera";
+          camContainer.appendChild(camHeader);
+          camContainer.appendChild(document.createElement("br"));
+
+          const camNote = document.createElement("span");
+          camNote.style.color = "#8b9bb0";
+          camNote.textContent = "Mapped on OpenStreetMap. Note: Live recording/monitoring not guaranteed.";
+          camContainer.appendChild(camNote);
+
+          camMarker.bindPopup(camContainer);
           group.addLayer(camMarker);
         }
       }

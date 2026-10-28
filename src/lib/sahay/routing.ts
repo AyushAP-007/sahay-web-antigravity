@@ -30,6 +30,7 @@ export interface RouteFeatureBreakdown {
   timeContextPenalty: number; // 0-25
   coverageConfidence: "high" | "medium" | "low";
   dataCoverageRatio: number; // 0-1
+  majorCorridorRatio?: number; // 0-1 measured street-name corridor heuristic
 }
 
 export interface PlannedRoute {
@@ -473,6 +474,7 @@ export function calculateRouteSafetyAssessment(features: SafetyFeatures): {
     timeContextPenalty: nightPenalty,
     coverageConfidence: confidence,
     dataCoverageRatio: features.dataCoverageRatio,
+    majorCorridorRatio: features.majorPedestrianStreetRatio,
   };
 
   return {
