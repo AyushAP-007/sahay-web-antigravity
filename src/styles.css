@@ -2,82 +2,63 @@
 @import "tw-animate-css";
 
 @theme {
-  /* THE NIGHT ATLAS: Deep ink, monsoon graphite, bioluminescent mint, warm marigold, vermilion */
-  --color-bg: #090d10;
-  --color-fg: #e6edf3;
-  --color-surface: #0f151b;
-  --color-card: #121921;
-  --color-muted: #17202a;
-  --color-muted-fg: #8b9bb0;
-  
-  --color-primary: #10b981;
-  --color-primary-fg: #04241a;
-  --color-secondary: #132427;
-  --color-secondary-fg: #34d399;
-  
-  --color-accent: #1e2638;
-  --color-accent-fg: #38bdf8;
-  
-  --color-danger: #f43f5e;
+  --color-bg: #f6f4ee;
+  --color-fg: #20312e;
+  --color-surface: #fffefa;
+  --color-card: #fffefa;
+  --color-muted: #efeee8;
+  --color-muted-fg: #71807a;
+  --color-primary: #176d60;
+  --color-primary-fg: #ffffff;
+  --color-secondary: #e8eee9;
+  --color-secondary-fg: #31574f;
+  --color-accent: #f6e7df;
+  --color-accent-fg: #854c3d;
+  --color-danger: #b94f43;
   --color-danger-fg: #ffffff;
-  --color-danger-soft: #2e1018;
-  
-  --color-success: #10b981;
-  --color-success-soft: #062b21;
-  
-  --color-warning: #f59e0b;
-  --color-warning-soft: #2d1e08;
-  
-  --color-info: #0284c7;
-  --color-info-soft: #08283d;
-  
-  --color-border: #1f2c3a;
-  --color-input: #1a2432;
-  --color-inverse-muted: #243547;
-  --color-inverse-copy: #c5d4e4;
-  
-  --color-bezel: #05080a;
-  --color-scene: #070a0d;
-  --color-background: #090d10;
-  --color-foreground: #e6edf3;
-  --color-card-foreground: #e6edf3;
-  --color-destructive: #f43f5e;
-  --color-ring: #10b981;
+  --color-danger-soft: #f8e8e3;
+  --color-success: #28745e;
+  --color-success-soft: #e2f0e8;
+  --color-warning: #9b6b28;
+  --color-warning-soft: #f6edda;
+  --color-info: #52778a;
+  --color-info-soft: #e7eff3;
+  --color-border: #e4e4dc;
+  --color-input: #dedfd8;
+  --color-inverse-muted: #c7dfd8;
+  --color-inverse-copy: #dfebe6;
+  --color-bezel: #1c2b28;
+  --color-scene: #c5d6cf;
+  --color-background: #f6f4ee;
+  --color-foreground: #20312e;
+  --color-card-foreground: #20312e;
+  --color-destructive: #b94f43;
+  --color-ring: #176d60;
 
-  --font-sans: "Plus Jakarta Sans", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-display: "Space Grotesk", "Plus Jakarta Sans", sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
 
   --radius-xs: 4px;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
-  --radius-xl: 22px;
+  --radius-xl: 24px;
   --radius: 18px;
 
   --shadow-border:
-    0px 0px 0px 1px rgba(31, 44, 58, 0.8),
-    0px 2px 4px -1px rgba(0, 0, 0, 0.6);
-  --shadow-soft:
-    0px 4px 20px -2px rgba(0, 0, 0, 0.5),
-    0px 0px 0px 1px rgba(31, 44, 58, 0.6);
-  --shadow-glow:
-    0 0 25px -4px rgba(16, 185, 129, 0.25);
-  --shadow-glow-amber:
-    0 0 25px -4px rgba(245, 158, 11, 0.25);
-  --shadow-glow-rose:
-    0 0 25px -4px rgba(244, 63, 94, 0.25);
+    0px 0px 0px 1px rgba(32, 49, 46, 0.06),
+    0px 1px 2px -1px rgba(32, 49, 46, 0.06),
+    0px 2px 4px 0px rgba(32, 49, 46, 0.04);
   --shadow-phone:
-    0 0 0 1px rgba(31, 44, 58, 0.9),
-    0 25px 65px -15px rgba(0, 0, 0, 0.85),
-    0 0 45px -10px rgba(16, 185, 129, 0.12);
+    0 0 0 1px rgba(28, 43, 40, 0.4),
+    0 18px 50px -12px rgba(23, 109, 96, 0.35),
+    0 40px 80px -28px rgba(32, 49, 46, 0.28);
 }
 
 @layer base {
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    color-scheme: dark;
   }
 
   html,
@@ -85,7 +66,6 @@
   #app {
     min-height: 100%;
     height: 100%;
-    background: var(--color-scene);
   }
 
   body {
@@ -110,7 +90,6 @@
   }
 }
 
-/* Atmospheric Night Atlas Scene Backdrop */
 .sahay-scene {
   min-height: 100dvh;
   display: flex;
@@ -118,58 +97,37 @@
   justify-content: center;
   gap: 56px;
   padding: 24px;
-  background-color: #070a0d;
-  background-image:
-    radial-gradient(1000px 600px at 20% 15%, rgba(16, 185, 129, 0.07) 0%, transparent 60%),
-    radial-gradient(800px 500px at 85% 85%, rgba(2, 132, 199, 0.06) 0%, transparent 55%),
-    radial-gradient(500px 400px at 50% 50%, rgba(245, 158, 11, 0.03) 0%, transparent 50%),
-    linear-gradient(180deg, #070a0d 0%, #0a0f14 50%, #06090c 100%);
-  position: relative;
-  overflow: hidden;
-}
-
-/* Subtle Topographic Grid overlay */
-.sahay-scene::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: 
-    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: 32px 32px;
-  pointer-events: none;
-  mask-image: radial-gradient(ellipse at center, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 80%);
+  background:
+    radial-gradient(1200px 560px at 18% 12%, #e7efe9 0%, transparent 58%),
+    radial-gradient(900px 480px at 88% 100%, #d3e4dc 0%, transparent 50%),
+    linear-gradient(180deg, #d7e4de 0%, #c5d6cf 48%, #b7cdc4 100%);
 }
 
 .sahay-story {
   display: none;
   width: min(28rem, 34vw);
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
   color: var(--color-fg);
-  z-index: 1;
 }
 
 .sahay-phone {
   width: 390px;
   height: min(844px, calc(100dvh - 32px));
-  padding: 10px;
-  border-radius: 46px;
+  padding: 12px;
+  border-radius: 44px;
   background: var(--color-bezel);
   box-shadow: var(--shadow-phone);
   position: relative;
   flex-shrink: 0;
-  z-index: 2;
-  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .sahay-phone-screen {
   height: 100%;
   overflow: hidden;
-  border-radius: 36px;
+  border-radius: 32px;
   background: var(--color-bg);
   position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .sahay-island {
@@ -177,29 +135,12 @@
   top: 10px;
   left: 50%;
   z-index: 30;
-  width: 120px;
+  width: 118px;
   height: 28px;
   transform: translateX(-50%);
   border-radius: 999px;
-  background: #020405;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  background: #0f1a18;
   pointer-events: none;
-}
-
-/* Custom scrollbars */
-::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: #1f2c3a;
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #2a3a4d;
 }
 
 @media (min-width: 1100px) {
@@ -214,10 +155,6 @@
     background: var(--color-bg);
   }
 
-  .sahay-scene::before {
-    display: none;
-  }
-
   .sahay-phone {
     width: 100%;
     height: 100dvh;
@@ -225,12 +162,10 @@
     border-radius: 0;
     box-shadow: none;
     background: var(--color-bg);
-    border: none;
   }
 
   .sahay-phone-screen {
     border-radius: 0;
-    border: none;
   }
 
   .sahay-island {
