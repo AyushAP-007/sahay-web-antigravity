@@ -94,6 +94,17 @@ export const MODE_WEIGHTS: Record<TravelMode, ModeWeights> = {
 };
 
 /**
+ * Convert a UTC Date to an equivalent Date whose local-time methods
+ * reflect IST (Asia/Kolkata, UTC+5:30). Required because the
+ * opening_hours library calls Date#getDay() / #getHours() which use
+ * the runtime system's local timezone, not IST.
+ */
+export function toIstLocalDate(date: Date): Date {
+  const istString = date.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+  return new Date(istString);
+}
+
+/**
  * Parses OpenStreetMap opening_hours string using robust npm library for IST time.
  */
 export function checkOpeningHoursStatus(
@@ -120,16 +131,17 @@ export function checkOpeningHoursStatus(
       lon,
       address: { country_code: "in" },
     });
+    const istTargetDate = toIstLocalDate(targetDate);
     // Check if the library marks this time/date as explicitly unknown
-    if (typeof oh.getUnknown === "function" && oh.getUnknown(targetDate)) {
+    if (typeof oh.getUnknown === "function" && oh.getUnknown(istTargetDate)) {
       return {
         status: "unknown",
         exceptionNote: "Opening hours are explicitly unknown or variable at this time.",
       };
     }
 
-    const isOpen = oh.getState(targetDate);
-    const comment = oh.getComment(targetDate);
+    const isOpen = oh.getState(istTargetDate);
+    const comment = oh.getComment(istTargetDate);
 
     // Try to extract readable schedule if available
     let weekly: string[] | undefined;
@@ -395,6 +407,7 @@ export function calculateNightActivityScore(
   factors: FactorScoreItem[];
   confidence: "high" | "medium" | "low";
   missingDataNotes: string[];
+  dataStatus: "scored" | "insufficient-data";
 } {
   const baseWeights = MODE_WEIGHTS[mode];
   const factors: FactorScoreItem[] = [];
@@ -532,24 +545,34 @@ export function calculateNightActivityScore(
 
   // Calculate sum of factor scores
   const totalScore = factors.reduce((acc, f) => acc + f.score, 0);
-  const clampedScore = Math.max(5, Math.min(98, totalScore));
+
+  // Check if route has sufficient evidence to compute a meaningful score
+  const totalPlaces = placesAlongRoute.length;
+  const hasEvidence = totalPlaces >= 1 || analysis.totalPlacesFound >= 1;
+  const dataStatus: "scored" | "insufficient-data" = hasEvidence ? "scored" : "insufficient-data";
+
+  // When evidence is insufficient, do NOT floor to 5/100
+  const finalScore = hasEvidence ? Math.max(5, Math.min(98, totalScore)) : 0;
 
   // Count place data states
-  const totalPlaces = placesAlongRoute.length;
   const openCount = placesAlongRoute.filter((p) => p.openingStatus === "open").length;
   const closedCount = placesAlongRoute.filter((p) => p.openingStatus === "closed").length;
   const unknownCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
 
-  if (unknownCount > 0) {
+  if (dataStatus === "insufficient-data") {
+    missingDataNotes.unshift("Insufficient mapped POI evidence along this route corridor to compute a reliable Night Activity Score.");
+  } else if (unknownCount > 0) {
     missingDataNotes.push(`${unknownCount} nearby place(s) had unlisted or unparseable opening hours.`);
   }
 
   const confidence: "high" | "medium" | "low" =
-    hasCameraData && unknownCount <= 2 && totalPlaces >= 4
-      ? "high"
-      : unknownCount > 5 || !hasCameraData || totalPlaces < 3
-        ? "low"
-        : "medium";
+    !hasEvidence
+      ? "low"
+      : hasCameraData && unknownCount <= 2 && totalPlaces >= 4
+        ? "high"
+        : unknownCount > 5 || !hasCameraData || totalPlaces < 3
+          ? "low"
+          : "medium";
 
     if (hasCameraData) {
       if (analysis.cameraCount === 0) {
@@ -560,9 +583,10 @@ export function calculateNightActivityScore(
     }
 
     return {
-      nightActivityScore: clampedScore,
+      nightActivityScore: finalScore,
       factors,
       confidence,
       missingDataNotes,
+      dataStatus,
     };
 }

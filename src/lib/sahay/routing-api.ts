@@ -76,9 +76,9 @@ export async function searchPlaces(input: {
     return placeCache.get(cacheKey)!;
   }
 
-  // Photon is designed specifically for client-side search/autocomplete
-  // Nominatim is NOT used for client autocomplete in accordance with OSM Foundation policy.
-  try {
+  // Strategy: Try Photon (fast geocoder) and Nominatim bounded to Pune simultaneously.
+  // Use Promise.allSettled so if Photon times out or is unreachable, Nominatim immediately succeeds.
+  const photonPromise = (async (): Promise<PlaceHit[]> => {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=18.5204&lon=73.8567&limit=10&lang=en`;
     const payload = await fetchJson<{
       features?: Array<{
@@ -91,7 +91,7 @@ export async function searchPlaces(input: {
           country?: string;
         };
       }>;
-    }>(url, {}, 5000);
+    }>(url, {}, 3500);
 
     const hits = (payload.features ?? [])
       .map((feature) => {
@@ -117,9 +117,48 @@ export async function searchPlaces(input: {
       })
       .filter((item): item is PlaceHit => item !== null);
 
-    const distinct = Array.from(new Map(hits.map((h) => [`${h.lat.toFixed(4)},${h.lng.toFixed(4)}`, h])).values());
+    return hits;
+  })();
+
+  const nominatimPromise = (async (): Promise<PlaceHit[]> => {
+    const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Pune")}&format=json&limit=8&countrycodes=in&viewbox=73.65,18.70,74.05,18.35&bounded=1`;
+    const items = await fetchJson<
+      Array<{ display_name?: string; lat?: string; lon?: string }>
+    >(nomUrl, { headers: { "User-Agent": UA } }, 4500);
+
+    return (items ?? [])
+      .map((item) => {
+        const lat = parseFloat(item.lat || "");
+        const lng = parseFloat(item.lon || "");
+        if (isNaN(lat) || isNaN(lng) || !isWithinPune(lat, lng)) return null;
+
+        const parts = (item.display_name || "").split(",").map((p) => p.trim()).filter(Boolean);
+        const label = parts.slice(0, 3).join(", ") || query;
+
+        return {
+          label,
+          lat,
+          lng,
+        } satisfies PlaceHit;
+      })
+      .filter((item): item is PlaceHit => item !== null);
+  })();
+
+  try {
+    const results = await Promise.allSettled([photonPromise, nominatimPromise]);
+
+    const photonHits = results[0].status === "fulfilled" ? results[0].value : [];
+    const nomHits = results[1].status === "fulfilled" ? results[1].value : [];
+
+    const combined = [...photonHits, ...nomHits];
+    const distinct = Array.from(
+      new Map(combined.map((h) => [`${h.lat.toFixed(4)},${h.lng.toFixed(4)}`, h])).values(),
+    );
+
     const result = distinct.slice(0, 5);
-    placeCache.set(cacheKey, result);
+    if (result.length > 0) {
+      placeCache.set(cacheKey, result);
+    }
     return result;
   } catch (err) {
     console.warn("Place search failed:", err);
@@ -387,56 +426,129 @@ export async function loadPuneCategorizedPlaces(
 
   const fetchedPlaces: MappedPlace[] = [];
 
-  // Use Photon for POI queries across route corridor (compliant with OSM guidelines)
-  const categoryQueries = [
-    { cat: "police" as const, query: "police", osmTag: "amenity:police" },
-    { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
-    { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
-    { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
-    { cat: "shop_food" as const, query: "cafe", osmTag: "amenity:cafe" },
-    { cat: "shop_food" as const, query: "supermarket", osmTag: "shop" },
-    { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
-    { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
+  // Query categories defined for the Pune route corridor
+  const nominatimCategories = [
+    { cat: "police" as const, query: "police station" },
+    { cat: "hospital" as const, query: "hospital" },
+    { cat: "pharmacy_medical" as const, query: "pharmacy" },
+    { cat: "shop_food" as const, query: "restaurant" },
+    { cat: "shop_food" as const, query: "cafe" },
+    { cat: "shop_food" as const, query: "supermarket" },
+    { cat: "fuel_cng" as const, query: "petrol pump" },
+    { cat: "transport" as const, query: "bus station" },
   ];
 
-  await Promise.all(
-    categoryQueries.map(async (cq, idx) => {
+  // Primary: Fetch POIs via Nominatim with bounded viewbox and extratags
+  try {
+    const viewboxStr = `${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)},${south.toFixed(4)}`;
+    const nomPromises = nominatimCategories.map(async (nc, idx) => {
+      // 80ms stagger between queries to avoid burst hammering
+      if (idx > 0) {
+        await new Promise((r) => setTimeout(r, idx * 80));
+      }
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nc.query)}&format=json&limit=8&countrycodes=in&viewbox=${viewboxStr}&bounded=1&extratags=1`;
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=12&osm_tag=${encodeURIComponent(cq.osmTag)}`;
-        const payload = await fetchJson<{
-          features?: Array<{
-            geometry?: { coordinates?: number[] };
-            properties?: {
-              name?: string;
-              osm_id?: number;
+        const items = await fetchJson<
+          Array<{
+            place_id?: number;
+            osm_id?: number;
+            display_name?: string;
+            lat?: string;
+            lon?: string;
+            extratags?: {
               opening_hours?: string;
               [k: string]: any;
             };
-          }>;
-        }>(url, {}, 5000);
+          }>
+        >(url, { headers: { "User-Agent": UA } }, 4500);
 
-        for (const f of payload.features ?? []) {
-          const [lng, lat] = f.geometry?.coordinates ?? [];
-          if (typeof lat !== "number" || typeof lng !== "number") continue;
+        for (const item of items ?? []) {
+          const lat = parseFloat(item.lat || "");
+          const lng = parseFloat(item.lon || "");
+          if (isNaN(lat) || isNaN(lng)) continue;
           if (lat < south || lat > north || lng < west || lng > east) continue;
 
-          // Do NOT invent opening hours — leave unlisted schedules as undefined/unknown
-          const rawHours = f.properties?.opening_hours || undefined;
+          const rawHours = item.extratags?.opening_hours || undefined;
+          const cleanName = item.display_name?.split(",")[0]?.trim() || nc.query;
 
           fetchedPlaces.push({
-            id: `place-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
-            name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
-            category: cq.cat,
+            id: `nom-${nc.cat}-${item.osm_id || item.place_id || Math.round(lat * 10000)}`,
+            name: cleanName,
+            category: nc.cat,
             lat,
             lng,
             openingHoursRaw: rawHours,
           });
         }
       } catch {
-        // Continue on individual category failure
+        // Continue on single category failure
       }
-    }),
-  );
+    });
+
+    await Promise.allSettled(nomPromises);
+  } catch (err) {
+    console.warn("Nominatim POI corridor search failed:", err);
+  }
+
+  // Fallback: If Nominatim yielded fewer than 3 places, attempt Photon fallback
+  if (fetchedPlaces.length < 3) {
+    const photonCategories = [
+      { cat: "police" as const, query: "police", osmTag: "amenity:police" },
+      { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
+      { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
+      { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
+      { cat: "shop_food" as const, query: "cafe", osmTag: "amenity:cafe" },
+      { cat: "shop_food" as const, query: "supermarket", osmTag: "shop" },
+      { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
+      { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
+    ];
+
+    await Promise.allSettled(
+      photonCategories.map(async (cq, idx) => {
+        try {
+          const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=12&osm_tag=${encodeURIComponent(cq.osmTag)}`;
+          const payload = await fetchJson<{
+            features?: Array<{
+              geometry?: { coordinates?: number[] };
+              properties?: {
+                name?: string;
+                osm_id?: number;
+                opening_hours?: string;
+                extra?: {
+                  opening_hours?: string;
+                  [k: string]: any;
+                };
+                [k: string]: any;
+              };
+            }>;
+          }>(url, {}, 3000);
+
+          for (const f of payload.features ?? []) {
+            const [lng, lat] = f.geometry?.coordinates ?? [];
+            if (typeof lat !== "number" || typeof lng !== "number") continue;
+            if (lat < south || lat > north || lng < west || lng > east) continue;
+
+            // Support both top-level and nested properties.extra.opening_hours
+            const rawHours =
+              f.properties?.opening_hours ||
+              f.properties?.extra?.opening_hours ||
+              undefined;
+
+            fetchedPlaces.push({
+              id: `photon-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
+              name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
+              category: cq.cat,
+              lat,
+              lng,
+              openingHoursRaw: rawHours,
+            });
+          }
+        } catch {
+          // Continue on individual category failure
+        }
+      }),
+    );
+  }
 
   const deduplicated = deduplicatePlaces(fetchedPlaces);
 
@@ -587,6 +699,7 @@ export async function planSafeRoutes(input: {
     return {
       ...route,
       nightActivityScore: scoring.nightActivityScore,
+      dataStatus: scoring.dataStatus,
       factors: scoring.factors,
       gapAnalysis,
       placesAlongRoute: placesAlong,

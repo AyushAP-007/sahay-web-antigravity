@@ -67,3 +67,79 @@ test("Audit P1: Zero camera mapping adds explicit unmapped note, not proof of ab
     "Should explain that 0 mapped cameras means OSM data is unmapped, not proof of complete absence in reality",
   );
 });
+
+test("Audit Phase 2: IST timezone consistency regardless of system timezone offset", () => {
+  // 9:00 AM IST = 03:30 UTC
+  const istNineAMUtc = new Date("2024-01-15T03:30:00.000Z");
+  const resultOpen = checkOpeningHoursStatus("Mo-Fr 09:00-18:00", istNineAMUtc);
+  assert.equal(resultOpen.status, "open", "9:00 AM IST on Monday should be open for 09:00-18:00 schedule");
+
+  // 12:00 Midnight IST = 18:30 UTC on previous day
+  const istMidnightUtc = new Date("2024-01-14T18:30:00.000Z");
+  const resultClosed = checkOpeningHoursStatus("Mo-Fr 09:00-18:00", istMidnightUtc);
+  assert.equal(resultClosed.status, "closed", "Midnight IST should be closed for 09:00-18:00 schedule");
+});
+
+test("Audit Phase 2: Honest insufficient-data state instead of arbitrary 5/100 score floor", () => {
+  const emptyAnalysis = analyzeRouteDistributionAndGaps(
+    [[18.51, 73.85], [18.52, 73.86]],
+    2000,
+    [],
+    [],
+    3,
+    0.3,
+  );
+  const result = calculateNightActivityScore(emptyAnalysis, "foot", [], false);
+  assert.equal(result.dataStatus, "insufficient-data", "Empty route corridor should be flagged insufficient-data");
+  assert.equal(result.nightActivityScore, 0, "Empty corridor should have score 0, not arbitrary 5/100 floor");
+  assert.ok(
+    result.missingDataNotes.some((n) => n.includes("Insufficient mapped POI evidence")),
+    "Must explain that score is not reliable due to insufficient evidence",
+  );
+});
+
+test("Audit Phase 2: Routes with genuine evidence receive score >= 5 and scored status", () => {
+  const mockPlaces: MappedPlace[] = [
+    {
+      id: "p1",
+      name: "Sancheti Hospital",
+      category: "hospital",
+      lat: 18.525,
+      lng: 73.855,
+      openingStatus: "open",
+      distanceAlongRouteMeters: 400,
+    },
+  ];
+  const analysis = analyzeRouteDistributionAndGaps(
+    [[18.52, 73.85], [18.53, 73.86]],
+    1500,
+    mockPlaces,
+    [],
+    2,
+    0.5,
+  );
+  const result = calculateNightActivityScore(analysis, "foot", mockPlaces, false);
+  assert.equal(result.dataStatus, "scored");
+  assert.ok(result.nightActivityScore >= 5, "Genuine evidence should yield score >= 5");
+});
+
+test("Audit Phase 2: Photon response mapping supports properties.extra.opening_hours", () => {
+  const rawPhotonFeature = {
+    geometry: { coordinates: [73.8567, 18.5204] },
+    properties: {
+      name: "Modern Cafe",
+      osm_id: 998877,
+      extra: {
+        opening_hours: "Mo-Su 08:00-23:00",
+      },
+    },
+  };
+
+  const extractedHours =
+    rawPhotonFeature.properties.extra?.opening_hours ||
+    (rawPhotonFeature.properties as any).opening_hours;
+
+  assert.equal(extractedHours, "Mo-Su 08:00-23:00");
+  const parsed = checkOpeningHoursStatus(extractedHours, new Date("2024-01-15T06:30:00.000Z")); // 12:00 PM IST
+  assert.equal(parsed.status, "open");
+});

@@ -43,6 +43,7 @@ export interface PlannedRoute {
   durationSeconds: number;
   safetyScore: number;
   nightActivityScore?: number;
+  dataStatus?: "scored" | "insufficient-data";
   confidence?: "high" | "medium" | "low";
   detourMeters?: number;
   reasons: string[];

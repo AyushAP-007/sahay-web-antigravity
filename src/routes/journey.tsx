@@ -309,7 +309,7 @@ function Planner({
 
   const selected = routes.find((route) => route.id === selectedId) ?? routes[0];
 
-  const useGps = async () => {
+  const handleGps = async () => {
     setBusy("gps");
     setError("");
     try {
@@ -544,7 +544,7 @@ function Planner({
           size="compact"
           variant="secondary"
           disabled={busy === "gps"}
-          onClick={() => void useGps()}
+          onClick={() => void handleGps()}
         >
           <LocateFixed className="size-4" />
           {busy === "gps" ? "Checking phone…" : "Use current phone location"}
@@ -732,9 +732,15 @@ function Planner({
                     </p>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    <Badge tone={badgeTone}>
-                      Night Activity {scoreVal}/100
-                    </Badge>
+                    {route.dataStatus === "insufficient-data" ? (
+                      <Badge tone="neutral">
+                        Insufficient mapped data
+                      </Badge>
+                    ) : (
+                      <Badge tone={badgeTone}>
+                        Night Activity {scoreVal}/100
+                      </Badge>
+                    )}
                     <span className="text-[10px] uppercase tracking-wider text-muted-fg">
                       {route.confidence ? `${route.confidence} coverage` : "heuristic"}
                     </span>
