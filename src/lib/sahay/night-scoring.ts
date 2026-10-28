@@ -546,31 +546,45 @@ export function calculateNightActivityScore(
   // Calculate sum of factor scores
   const totalScore = factors.reduce((acc, f) => acc + f.score, 0);
 
-  // Check if route has sufficient evidence to compute a meaningful score
-  const totalPlaces = placesAlongRoute.length;
-  const hasEvidence = totalPlaces >= 1 || analysis.totalPlacesFound >= 1;
-  const dataStatus: "scored" | "insufficient-data" = hasEvidence ? "scored" : "insufficient-data";
-
-  // When evidence is insufficient, do NOT floor to 5/100
-  const finalScore = hasEvidence ? Math.max(5, Math.min(98, totalScore)) : 0;
-
   // Count place data states
+  const totalPlaces = placesAlongRoute.length;
   const openCount = placesAlongRoute.filter((p) => p.openingStatus === "open").length;
   const closedCount = placesAlongRoute.filter((p) => p.openingStatus === "closed").length;
   const unknownCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
 
+  // Distinguish mapped place existence from USABLE evidence for night activity scoring:
+  // A place with unknown/unlisted opening hours cannot be confirmed open or closed.
+  // Genuine usable evidence requires confirmed open/closed places, mapped cameras, confirmed help points,
+  // or a substantial mapped place sample (> 4 places indicating a populated corridor with partial data).
+  const confirmedPlaces = openCount + closedCount;
+  const hasUsableEvidence =
+    confirmedPlaces >= 1 ||
+    analysis.totalOpenCommercial >= 1 ||
+    analysis.totalOpenHelpPoints >= 1 ||
+    (hasCameraData && analysis.cameraCount >= 1) ||
+    totalPlaces >= 4;
+
+  const dataStatus: "scored" | "insufficient-data" = hasUsableEvidence ? "scored" : "insufficient-data";
+
+  // When usable evidence is insufficient, do NOT floor to 5/100
+  const finalScore = hasUsableEvidence ? Math.max(5, Math.min(98, totalScore)) : 0;
+
   if (dataStatus === "insufficient-data") {
-    missingDataNotes.unshift("Insufficient mapped POI evidence along this route corridor to compute a reliable Night Activity Score.");
+    missingDataNotes.unshift(
+      totalPlaces > 0
+        ? `Found ${totalPlaces} nearby place(s), but none have verified opening schedules or usable safety telemetry. Evidence is insufficient for a reliable Night Activity Score.`
+        : "Insufficient mapped POI evidence along this route corridor to compute a reliable Night Activity Score.",
+    );
   } else if (unknownCount > 0) {
     missingDataNotes.push(`${unknownCount} nearby place(s) had unlisted or unparseable opening hours.`);
   }
 
   const confidence: "high" | "medium" | "low" =
-    !hasEvidence
+    !hasUsableEvidence
       ? "low"
-      : hasCameraData && unknownCount <= 2 && totalPlaces >= 4
+      : hasCameraData && unknownCount <= 2 && (confirmedPlaces >= 3 || totalPlaces >= 6)
         ? "high"
-        : unknownCount > 5 || !hasCameraData || totalPlaces < 3
+        : unknownCount > 5 || !hasCameraData || confirmedPlaces < 2
           ? "low"
           : "medium";
 

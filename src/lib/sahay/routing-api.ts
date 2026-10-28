@@ -62,6 +62,67 @@ async function fetchJson<T>(
   }
 }
 
+export interface PhotonFeature {
+  geometry?: { coordinates?: number[] };
+  properties?: {
+    name?: string;
+    street?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    osm_id?: number;
+    osm_key?: string;
+    osm_value?: string;
+    opening_hours?: string;
+    extra?: {
+      opening_hours?: string;
+      [k: string]: any;
+    };
+    [k: string]: any;
+  };
+}
+
+/**
+ * Maps a raw Photon feature into the application's internal MappedPlace structure.
+ * Supports both top-level `properties.opening_hours` and nested `properties.extra.opening_hours`.
+ */
+export function mapPhotonFeatureToMappedPlace(
+  feature: PhotonFeature,
+  category: MappedPlace["category"],
+  index = 0,
+  bounds?: { south: number; north: number; west: number; east: number },
+): MappedPlace | null {
+  const [lng, lat] = feature.geometry?.coordinates ?? [];
+  if (typeof lat !== "number" || typeof lng !== "number") return null;
+
+  if (bounds) {
+    if (lat < bounds.south || lat > bounds.north || lng < bounds.west || lng > bounds.east) {
+      return null;
+    }
+  }
+
+  // Safe precedence: top-level opening_hours, then nested extra.opening_hours
+  const rawHours =
+    feature.properties?.opening_hours?.trim() ||
+    feature.properties?.extra?.opening_hours?.trim() ||
+    undefined;
+
+  const osmId = feature.properties?.osm_id || Math.round(lat * 10000);
+  const name =
+    feature.properties?.name?.trim() ||
+    feature.properties?.street?.trim() ||
+    `${category.replace("_", " ")}`;
+
+  return {
+    id: `photon-${category}-${index}-${osmId}`,
+    name,
+    category,
+    lat,
+    lng,
+    openingHoursRaw: rawHours,
+  };
+}
+
 // Search place cache to avoid repetitive queries
 const placeCache = new Map<string, PlaceHit[]>();
 
@@ -76,22 +137,14 @@ export async function searchPlaces(input: {
     return placeCache.get(cacheKey)!;
   }
 
-  // Strategy: Try Photon (fast geocoder) and Nominatim bounded to Pune simultaneously.
-  // Use Promise.allSettled so if Photon times out or is unreachable, Nominatim immediately succeeds.
-  const photonPromise = (async (): Promise<PlaceHit[]> => {
+  // Photon is designed and licensed specifically for client-side search/autocomplete.
+  // Public Nominatim is NOT used for client-side autocomplete in accordance with the
+  // OpenStreetMap Foundation / Nominatim Acceptable Use Policy.
+  try {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=18.5204&lon=73.8567&limit=10&lang=en`;
     const payload = await fetchJson<{
-      features?: Array<{
-        geometry?: { coordinates?: number[] };
-        properties?: {
-          name?: string;
-          street?: string;
-          city?: string;
-          state?: string;
-          country?: string;
-        };
-      }>;
-    }>(url, {}, 3500);
+      features?: PhotonFeature[];
+    }>(url, {}, 4500);
 
     const hits = (payload.features ?? [])
       .map((feature) => {
@@ -117,42 +170,8 @@ export async function searchPlaces(input: {
       })
       .filter((item): item is PlaceHit => item !== null);
 
-    return hits;
-  })();
-
-  const nominatimPromise = (async (): Promise<PlaceHit[]> => {
-    const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ", Pune")}&format=json&limit=8&countrycodes=in&viewbox=73.65,18.70,74.05,18.35&bounded=1`;
-    const items = await fetchJson<
-      Array<{ display_name?: string; lat?: string; lon?: string }>
-    >(nomUrl, { headers: { "User-Agent": UA } }, 4500);
-
-    return (items ?? [])
-      .map((item) => {
-        const lat = parseFloat(item.lat || "");
-        const lng = parseFloat(item.lon || "");
-        if (isNaN(lat) || isNaN(lng) || !isWithinPune(lat, lng)) return null;
-
-        const parts = (item.display_name || "").split(",").map((p) => p.trim()).filter(Boolean);
-        const label = parts.slice(0, 3).join(", ") || query;
-
-        return {
-          label,
-          lat,
-          lng,
-        } satisfies PlaceHit;
-      })
-      .filter((item): item is PlaceHit => item !== null);
-  })();
-
-  try {
-    const results = await Promise.allSettled([photonPromise, nominatimPromise]);
-
-    const photonHits = results[0].status === "fulfilled" ? results[0].value : [];
-    const nomHits = results[1].status === "fulfilled" ? results[1].value : [];
-
-    const combined = [...photonHits, ...nomHits];
     const distinct = Array.from(
-      new Map(combined.map((h) => [`${h.lat.toFixed(4)},${h.lng.toFixed(4)}`, h])).values(),
+      new Map(hits.map((h) => [`${h.lat.toFixed(4)},${h.lng.toFixed(4)}`, h])).values(),
     );
 
     const result = distinct.slice(0, 5);
@@ -406,6 +425,9 @@ export const fetchMultiPathWalkingRoutes = (from: PlaceHit, to: PlaceHit) =>
  * Loads rich categorized places along candidate routes.
  * Uses Nominatim with viewbox bounding and fallback to Photon.
  */
+// POI Corridor Cache to avoid redundant requests across same journey bounds
+const poiCorridorCache = new Map<string, { places: MappedPlace[]; cameras: MappedPlace[]; camerasAvailable: boolean }>();
+
 export async function loadPuneCategorizedPlaces(
   geometries: Array<[number, number][]>,
 ): Promise<{ places: MappedPlace[]; cameras: MappedPlace[]; camerasAvailable: boolean }> {
@@ -421,138 +443,54 @@ export async function loadPuneCategorizedPlaces(
   const west = Math.max(PUNE_BOUNDS.minLng, Math.min(...lngs) - 0.015);
   const east = Math.min(PUNE_BOUNDS.maxLng, Math.max(...lngs) + 0.015);
 
+  const corridorKey = `${south.toFixed(3)},${north.toFixed(3)},${west.toFixed(3)},${east.toFixed(3)}`;
+  if (poiCorridorCache.has(corridorKey)) {
+    return poiCorridorCache.get(corridorKey)!;
+  }
+
   const centerLat = (south + north) / 2;
   const centerLng = (west + east) / 2;
+  const bounds = { south, north, west, east };
 
   const fetchedPlaces: MappedPlace[] = [];
 
-  // Query categories defined for the Pune route corridor
-  const nominatimCategories = [
-    { cat: "police" as const, query: "police station" },
-    { cat: "hospital" as const, query: "hospital" },
-    { cat: "pharmacy_medical" as const, query: "pharmacy" },
-    { cat: "shop_food" as const, query: "restaurant" },
-    { cat: "shop_food" as const, query: "cafe" },
-    { cat: "shop_food" as const, query: "supermarket" },
-    { cat: "fuel_cng" as const, query: "petrol pump" },
-    { cat: "transport" as const, query: "bus station" },
+  // Strategy:
+  // Query POIs through Photon (permissible for OSM POI querying and autocomplete) across categories.
+  // Photon supports osm_tag filtering, coordinates biasing, and returns extra tags including opening_hours.
+  const photonCategories = [
+    { cat: "police" as const, query: "police", osmTag: "amenity:police" },
+    { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
+    { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
+    { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
+    { cat: "shop_food" as const, query: "cafe", osmTag: "amenity:cafe" },
+    { cat: "shop_food" as const, query: "supermarket", osmTag: "shop" },
+    { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
+    { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
   ];
 
-  // Primary: Fetch POIs via Nominatim with bounded viewbox and extratags
-  try {
-    const viewboxStr = `${west.toFixed(4)},${north.toFixed(4)},${east.toFixed(4)},${south.toFixed(4)}`;
-    const nomPromises = nominatimCategories.map(async (nc, idx) => {
-      // 80ms stagger between queries to avoid burst hammering
-      if (idx > 0) {
-        await new Promise((r) => setTimeout(r, idx * 80));
-      }
-      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(nc.query)}&format=json&limit=8&countrycodes=in&viewbox=${viewboxStr}&bounded=1&extratags=1`;
+  await Promise.allSettled(
+    photonCategories.map(async (cq, idx) => {
       try {
-        const items = await fetchJson<
-          Array<{
-            place_id?: number;
-            osm_id?: number;
-            display_name?: string;
-            lat?: string;
-            lon?: string;
-            extratags?: {
-              opening_hours?: string;
-              [k: string]: any;
-            };
-          }>
-        >(url, { headers: { "User-Agent": UA } }, 4500);
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=12&osm_tag=${encodeURIComponent(cq.osmTag)}`;
+        const payload = await fetchJson<{
+          features?: PhotonFeature[];
+        }>(url, {}, 4000);
 
-        for (const item of items ?? []) {
-          const lat = parseFloat(item.lat || "");
-          const lng = parseFloat(item.lon || "");
-          if (isNaN(lat) || isNaN(lng)) continue;
-          if (lat < south || lat > north || lng < west || lng > east) continue;
-
-          const rawHours = item.extratags?.opening_hours || undefined;
-          const cleanName = item.display_name?.split(",")[0]?.trim() || nc.query;
-
-          fetchedPlaces.push({
-            id: `nom-${nc.cat}-${item.osm_id || item.place_id || Math.round(lat * 10000)}`,
-            name: cleanName,
-            category: nc.cat,
-            lat,
-            lng,
-            openingHoursRaw: rawHours,
-          });
+        for (const f of payload.features ?? []) {
+          const place = mapPhotonFeatureToMappedPlace(f, cq.cat, idx, bounds);
+          if (place) {
+            fetchedPlaces.push(place);
+          }
         }
       } catch {
-        // Continue on single category failure
+        // Continue on individual category failure
       }
-    });
-
-    await Promise.allSettled(nomPromises);
-  } catch (err) {
-    console.warn("Nominatim POI corridor search failed:", err);
-  }
-
-  // Fallback: If Nominatim yielded fewer than 3 places, attempt Photon fallback
-  if (fetchedPlaces.length < 3) {
-    const photonCategories = [
-      { cat: "police" as const, query: "police", osmTag: "amenity:police" },
-      { cat: "hospital" as const, query: "hospital", osmTag: "amenity:hospital" },
-      { cat: "pharmacy_medical" as const, query: "pharmacy", osmTag: "amenity:pharmacy" },
-      { cat: "shop_food" as const, query: "restaurant", osmTag: "amenity:restaurant" },
-      { cat: "shop_food" as const, query: "cafe", osmTag: "amenity:cafe" },
-      { cat: "shop_food" as const, query: "supermarket", osmTag: "shop" },
-      { cat: "fuel_cng" as const, query: "fuel", osmTag: "amenity:fuel" },
-      { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
-    ];
-
-    await Promise.allSettled(
-      photonCategories.map(async (cq, idx) => {
-        try {
-          const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=12&osm_tag=${encodeURIComponent(cq.osmTag)}`;
-          const payload = await fetchJson<{
-            features?: Array<{
-              geometry?: { coordinates?: number[] };
-              properties?: {
-                name?: string;
-                osm_id?: number;
-                opening_hours?: string;
-                extra?: {
-                  opening_hours?: string;
-                  [k: string]: any;
-                };
-                [k: string]: any;
-              };
-            }>;
-          }>(url, {}, 3000);
-
-          for (const f of payload.features ?? []) {
-            const [lng, lat] = f.geometry?.coordinates ?? [];
-            if (typeof lat !== "number" || typeof lng !== "number") continue;
-            if (lat < south || lat > north || lng < west || lng > east) continue;
-
-            // Support both top-level and nested properties.extra.opening_hours
-            const rawHours =
-              f.properties?.opening_hours ||
-              f.properties?.extra?.opening_hours ||
-              undefined;
-
-            fetchedPlaces.push({
-              id: `photon-${cq.cat}-${idx}-${f.properties?.osm_id || Math.round(lat * 10000)}`,
-              name: f.properties?.name || `${cq.cat.replace("_", " ")}`,
-              category: cq.cat,
-              lat,
-              lng,
-              openingHoursRaw: rawHours,
-            });
-          }
-        } catch {
-          // Continue on individual category failure
-        }
-      }),
-    );
-  }
+    }),
+  );
 
   const deduplicated = deduplicatePlaces(fetchedPlaces);
 
-  // Check Overpass for live surveillance cameras
+  // Check Overpass for live surveillance cameras with timeout
   let cameras: MappedPlace[] = [];
   let camerasAvailable = false;
 
@@ -567,7 +505,7 @@ export async function loadPuneCategorizedPlaces(
         "User-Agent": UA,
       },
       body: `data=${encodeURIComponent(overpassQuery)}`,
-    }, 5000);
+    }, 4500);
 
     if (ovRes.elements) {
       camerasAvailable = true;
@@ -580,15 +518,18 @@ export async function loadPuneCategorizedPlaces(
       }));
     }
   } catch {
-    // If Overpass is rate-limited or unavailable, record camera data as unavailable
+    // Overpass unavailable or rate-limited; cameras marked unavailable
     camerasAvailable = false;
   }
 
-  return {
+  const result = {
     places: deduplicated,
     cameras,
     camerasAvailable,
   };
+
+  poiCorridorCache.set(corridorKey, result);
+  return result;
 }
 
 /**

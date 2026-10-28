@@ -117,9 +117,11 @@ function JourneyScreen() {
           {active.selectedRoute ? (
             <p className="text-[11px] text-muted-fg">
               {formatWalkTime(active.selectedRoute.durationSeconds)} ·{" "}
-              {formatKm(active.selectedRoute.distanceMeters)} · Night Activity Score{" "}
-              {active.selectedRoute.nightActivityScore ?? active.selectedRoute.safetyScore}/100.
-              This indicates mapped activity & access points, not guaranteed safety.
+              {formatKm(active.selectedRoute.distanceMeters)} ·{" "}
+              {active.selectedRoute.dataStatus === "insufficient-data"
+                ? "Insufficient mapped data"
+                : `Night Activity Score ${active.selectedRoute.nightActivityScore ?? active.selectedRoute.safetyScore}/100`}.
+              {" "}This indicates mapped activity & access points, not guaranteed safety.
             </p>
           ) : null}
           <div className="flex items-center gap-2 rounded-2xl bg-card/60 px-3 py-2 text-xs text-fg">

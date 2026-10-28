@@ -6,7 +6,11 @@ import {
   analyzeRouteDistributionAndGaps,
   type MappedPlace,
 } from "./night-scoring.ts";
-import { isWithinPune } from "./routing-api.ts";
+import {
+  isWithinPune,
+  mapPhotonFeatureToMappedPlace,
+  type PhotonFeature,
+} from "./routing-api.ts";
 import { describeRouteFailure } from "./routing.ts";
 
 test("Audit P0: Nominatim policy compliance & boundary checks", () => {
@@ -124,22 +128,140 @@ test("Audit Phase 2: Routes with genuine evidence receive score >= 5 and scored 
 });
 
 test("Audit Phase 2: Photon response mapping supports properties.extra.opening_hours", () => {
-  const rawPhotonFeature = {
+  const rawPhotonFeature: PhotonFeature = {
     geometry: { coordinates: [73.8567, 18.5204] },
     properties: {
       name: "Modern Cafe",
       osm_id: 998877,
+      osm_key: "amenity",
+      osm_value: "cafe",
       extra: {
         opening_hours: "Mo-Su 08:00-23:00",
       },
     },
   };
 
-  const extractedHours =
-    rawPhotonFeature.properties.extra?.opening_hours ||
-    (rawPhotonFeature.properties as any).opening_hours;
+  // Call the actual production mapper function
+  const place = mapPhotonFeatureToMappedPlace(rawPhotonFeature, "shop_food", 1);
+  assert.ok(place !== null, "Production mapper must successfully create a MappedPlace");
+  assert.equal(place.id, "photon-shop_food-1-998877");
+  assert.equal(place.name, "Modern Cafe");
+  assert.equal(place.openingHoursRaw, "Mo-Su 08:00-23:00");
+  assert.equal(place.lat, 18.5204);
+  assert.equal(place.lng, 73.8567);
 
-  assert.equal(extractedHours, "Mo-Su 08:00-23:00");
-  const parsed = checkOpeningHoursStatus(extractedHours, new Date("2024-01-15T06:30:00.000Z")); // 12:00 PM IST
+  const parsed = checkOpeningHoursStatus(place.openingHoursRaw, new Date("2024-01-15T06:30:00.000Z")); // 12:00 PM IST
   assert.equal(parsed.status, "open");
+});
+
+test("Audit Phase 3: Route with places that only have unknown hours receives insufficient-data status", () => {
+  const geom: [number, number][] = [
+    [18.52, 73.85],
+    [18.53, 73.86],
+  ];
+  // Places exist, but have NO confirmed opening hours (only unknown/unlisted)
+  const placesWithUnknownHours: MappedPlace[] = [
+    {
+      id: "u1",
+      name: "Unverified Shop 1",
+      category: "shop_food",
+      lat: 18.522,
+      lng: 73.852,
+      openingStatus: "unknown",
+      distanceAlongRouteMeters: 300,
+    },
+    {
+      id: "u2",
+      name: "Unverified Shop 2",
+      category: "shop_food",
+      lat: 18.527,
+      lng: 73.857,
+      openingStatus: "unknown",
+      distanceAlongRouteMeters: 800,
+    },
+  ];
+
+  const analysis = analyzeRouteDistributionAndGaps(geom, 1500, placesWithUnknownHours, [], 3, 0.2);
+  const result = calculateNightActivityScore(analysis, "foot", placesWithUnknownHours, false);
+
+  assert.equal(result.dataStatus, "insufficient-data", "Places with only unknown hours must NOT produce a scored status");
+  assert.equal(result.nightActivityScore, 0, "Score must be 0 when no usable confirmed telemetry exists");
+  assert.ok(
+    result.missingDataNotes.some((n) => n.includes("none have verified opening schedules")),
+    "Missing data notes must clearly state that schedules are unverified",
+  );
+});
+
+test("Audit Phase 3: Three distinct candidate routes evaluated independently with different evidence", () => {
+  // Route A: Corridor with confirmed-open hospital and open cafe
+  const geomA: [number, number][] = [
+    [18.52, 73.84],
+    [18.53, 73.85],
+    [18.54, 73.86],
+  ];
+  const placesA: MappedPlace[] = [
+    { id: "h1", name: "Apex Hospital", category: "hospital", lat: 18.525, lng: 73.845, openingStatus: "open", distanceAlongRouteMeters: 500 },
+    { id: "c1", name: "24/7 Chai Cafe", category: "shop_food", lat: 18.535, lng: 73.855, openingStatus: "open", distanceAlongRouteMeters: 1200 },
+  ];
+
+  // Route B: Substantially different corridor with zero mapped facilities
+  const geomB: [number, number][] = [
+    [18.51, 73.82],
+    [18.515, 73.83],
+    [18.52, 73.84],
+  ];
+  const placesB: MappedPlace[] = [];
+
+  // Route C: High-turn complex corridor with only closed shops
+  const geomC: [number, number][] = [
+    [18.50, 73.85],
+    [18.505, 73.855],
+    [18.51, 73.86],
+  ];
+  const placesC: MappedPlace[] = [
+    { id: "s1", name: "Day Market Store", category: "shop_food", lat: 18.505, lng: 73.855, openingStatus: "closed", distanceAlongRouteMeters: 600 },
+  ];
+
+  const analysisA = analyzeRouteDistributionAndGaps(geomA, 2500, placesA, [], 2, 0.6);
+  const analysisB = analyzeRouteDistributionAndGaps(geomB, 2500, placesB, [], 1, 0.1);
+  const analysisC = analyzeRouteDistributionAndGaps(geomC, 2500, placesC, [], 8, 0.3);
+
+  const scoreA = calculateNightActivityScore(analysisA, "foot", placesA, false);
+  const scoreB = calculateNightActivityScore(analysisB, "foot", placesB, false);
+  const scoreC = calculateNightActivityScore(analysisC, "foot", placesC, false);
+
+  // Route A must have a high score
+  assert.equal(scoreA.dataStatus, "scored");
+  assert.ok(scoreA.nightActivityScore >= 20, "Route A with hospital and cafe must have strong score");
+
+  // Route B has no facilities -> insufficient data
+  assert.equal(scoreB.dataStatus, "insufficient-data");
+  assert.equal(scoreB.nightActivityScore, 0);
+
+  // Route C has confirmed closed places -> scored with low score
+  assert.equal(scoreC.dataStatus, "scored");
+  assert.ok(scoreC.nightActivityScore < scoreA.nightActivityScore);
+
+  // Ensure factors and scores are strictly different
+  assert.notEqual(scoreA.nightActivityScore, scoreB.nightActivityScore);
+  assert.notEqual(scoreA.nightActivityScore, scoreC.nightActivityScore);
+});
+
+test("Audit Phase 3: Legitimately equal routes produce equal scores deterministically", () => {
+  const geom: [number, number][] = [
+    [18.52, 73.85],
+    [18.53, 73.86],
+  ];
+  const places: MappedPlace[] = [
+    { id: "p1", name: "Clinic A", category: "pharmacy_medical", lat: 18.525, lng: 73.855, openingStatus: "open", distanceAlongRouteMeters: 500 },
+  ];
+
+  const analysis1 = analyzeRouteDistributionAndGaps(geom, 1500, places, [], 3, 0.4);
+  const analysis2 = analyzeRouteDistributionAndGaps(geom, 1500, places, [], 3, 0.4);
+
+  const score1 = calculateNightActivityScore(analysis1, "foot", places, false);
+  const score2 = calculateNightActivityScore(analysis2, "foot", places, false);
+
+  assert.equal(score1.nightActivityScore, score2.nightActivityScore);
+  assert.deepEqual(score1.factors, score2.factors);
 });
