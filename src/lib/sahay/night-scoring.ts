@@ -552,16 +552,22 @@ export function calculateNightActivityScore(
   const closedCount = placesAlongRoute.filter((p) => p.openingStatus === "closed").length;
   const unknownCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
 
-  // Distinguish mapped place existence from USABLE evidence for night activity scoring:
-  // A place with unknown/unlisted opening hours cannot be confirmed open or closed.
-  // Genuine usable evidence requires confirmed open/closed places, mapped cameras, confirmed help points,
-  // or a substantial mapped place sample (> 4 places indicating a populated corridor with partial data).
+  // Defensible evidence threshold for night activity scoring:
+  // A single closed shop or places with unverified hours do NOT provide sufficient telemetry
+  // to evaluate night activity along a route corridor.
+  // Genuine usable evidence requires:
+  // 1) Confirmed-open commercial venues or help points, OR
+  // 2) Mapped cameras in the corridor (when camera provider is available), OR
+  // 3) A verifiable multi-point sample (at least 2 confirmed open/closed places, OR at least 4 total mapped places).
+  // Routes with only 1 closed venue and 0 open places, or routes with 1-3 places whose hours are all unknown,
+  // do NOT meet the threshold and are marked "insufficient-data" (score 0, not floored to 5/100).
   const confirmedPlaces = openCount + closedCount;
   const hasUsableEvidence =
-    confirmedPlaces >= 1 ||
+    openCount >= 1 ||
     analysis.totalOpenCommercial >= 1 ||
     analysis.totalOpenHelpPoints >= 1 ||
     (hasCameraData && analysis.cameraCount >= 1) ||
+    confirmedPlaces >= 2 ||
     totalPlaces >= 4;
 
   const dataStatus: "scored" | "insufficient-data" = hasUsableEvidence ? "scored" : "insufficient-data";

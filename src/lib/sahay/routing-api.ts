@@ -423,17 +423,31 @@ export const fetchMultiPathWalkingRoutes = (from: PlaceHit, to: PlaceHit) =>
 
 /**
  * Loads rich categorized places along candidate routes.
- * Uses Nominatim with viewbox bounding and fallback to Photon.
+ * Uses Photon for client-safe POI searches by category with geographic bounds,
+ * and Overpass for surveillance camera telemetry.
  */
-// POI Corridor Cache to avoid redundant requests across same journey bounds
-const poiCorridorCache = new Map<string, { places: MappedPlace[]; cameras: MappedPlace[]; camerasAvailable: boolean }>();
+export interface CategorizedPlacesResult {
+  places: MappedPlace[];
+  cameras: MappedPlace[];
+  camerasAvailable: boolean;
+  providerStatus: "success" | "partial" | "failed";
+  providerMessage?: string;
+}
+
+// POI Corridor Cache to avoid redundant requests across same journey bounds (10-minute TTL)
+interface CacheEntry {
+  data: CategorizedPlacesResult;
+  timestamp: number;
+}
+const poiCorridorCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export async function loadPuneCategorizedPlaces(
   geometries: Array<[number, number][]>,
-): Promise<{ places: MappedPlace[]; cameras: MappedPlace[]; camerasAvailable: boolean }> {
+): Promise<CategorizedPlacesResult> {
   const allPoints = geometries.flat();
   if (allPoints.length < 2) {
-    return { places: [], cameras: [], camerasAvailable: false };
+    return { places: [], cameras: [], camerasAvailable: false, providerStatus: "success" };
   }
 
   const lats = allPoints.map((p) => p[0]);
@@ -444,8 +458,9 @@ export async function loadPuneCategorizedPlaces(
   const east = Math.min(PUNE_BOUNDS.maxLng, Math.max(...lngs) + 0.015);
 
   const corridorKey = `${south.toFixed(3)},${north.toFixed(3)},${west.toFixed(3)},${east.toFixed(3)}`;
-  if (poiCorridorCache.has(corridorKey)) {
-    return poiCorridorCache.get(corridorKey)!;
+  const cached = poiCorridorCache.get(corridorKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.data;
   }
 
   const centerLat = (south + north) / 2;
@@ -468,6 +483,9 @@ export async function loadPuneCategorizedPlaces(
     { cat: "transport" as const, query: "bus_stop", osmTag: "highway:bus_stop" },
   ];
 
+  let successCount = 0;
+  let failCount = 0;
+
   await Promise.allSettled(
     photonCategories.map(async (cq, idx) => {
       try {
@@ -476,6 +494,7 @@ export async function loadPuneCategorizedPlaces(
           features?: PhotonFeature[];
         }>(url, {}, 4000);
 
+        successCount += 1;
         for (const f of payload.features ?? []) {
           const place = mapPhotonFeatureToMappedPlace(f, cq.cat, idx, bounds);
           if (place) {
@@ -483,12 +502,24 @@ export async function loadPuneCategorizedPlaces(
           }
         }
       } catch {
-        // Continue on individual category failure
+        failCount += 1;
       }
     }),
   );
 
   const deduplicated = deduplicatePlaces(fetchedPlaces);
+
+  // Determine provider outcome honestly
+  let providerStatus: "success" | "partial" | "failed" = "success";
+  let providerMessage: string | undefined;
+
+  if (failCount === photonCategories.length) {
+    providerStatus = "failed";
+    providerMessage = "POI map service was unreachable for this corridor.";
+  } else if (failCount > 0) {
+    providerStatus = "partial";
+    providerMessage = `Partial POI response: ${successCount}/${photonCategories.length} categories responded.`;
+  }
 
   // Check Overpass for live surveillance cameras with timeout
   let cameras: MappedPlace[] = [];
@@ -522,13 +553,19 @@ export async function loadPuneCategorizedPlaces(
     camerasAvailable = false;
   }
 
-  const result = {
+  const result: CategorizedPlacesResult = {
     places: deduplicated,
     cameras,
     camerasAvailable,
+    providerStatus,
+    providerMessage,
   };
 
-  poiCorridorCache.set(corridorKey, result);
+  // Only cache if not a total provider failure (do not cache total outages)
+  if (providerStatus !== "failed") {
+    poiCorridorCache.set(corridorKey, { data: result, timestamp: Date.now() });
+  }
+
   return result;
 }
 
@@ -573,7 +610,7 @@ export async function planSafeRoutes(input: {
     throw new Error(describeRouteFailure("none"));
   }
 
-  const { places, cameras, camerasAvailable } = await loadPuneCategorizedPlaces(
+  const { places, cameras, camerasAvailable, providerMessage } = await loadPuneCategorizedPlaces(
     rawCandidates.map((c) => c.geometry),
   );
 
@@ -648,6 +685,7 @@ export async function planSafeRoutes(input: {
       hasCameraData: camerasAvailable,
       navigationSteps: rawMatch?.navigationSteps,
       missingDataNotes: [
+        ...(providerMessage ? [providerMessage] : []),
         ...(route.missingDataNotes ?? []),
         ...scoring.missingDataNotes,
       ],

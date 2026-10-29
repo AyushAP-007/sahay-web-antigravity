@@ -103,12 +103,14 @@ function JourneyScreen() {
             <p className="text-[9px] font-bold tracking-[0.14em] text-secondary-fg">
               IN PROGRESS
             </p>
-            <Badge tone={active.offRouteSimulated ? "warning" : "success"}>
-              {active.selectedRoute?.nightActivityScore
-                ? `Night Activity ${active.selectedRoute.nightActivityScore}/100`
-                : active.offRouteSimulated
-                  ? "Off-route demo"
-                  : "On watch"}
+            <Badge tone={active.offRouteSimulated ? "warning" : active.selectedRoute?.dataStatus === "insufficient-data" ? "neutral" : "success"}>
+              {active.selectedRoute?.dataStatus === "insufficient-data"
+                ? "Insufficient mapped data"
+                : active.selectedRoute?.nightActivityScore !== undefined
+                  ? `Night Activity ${active.selectedRoute.nightActivityScore}/100`
+                  : active.offRouteSimulated
+                    ? "Off-route demo"
+                    : "On watch"}
             </Badge>
           </div>
           <p className="font-display text-xl font-semibold tracking-[-0.03em] text-fg">

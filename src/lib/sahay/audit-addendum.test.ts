@@ -238,13 +238,48 @@ test("Audit Phase 3: Three distinct candidate routes evaluated independently wit
   assert.equal(scoreB.dataStatus, "insufficient-data");
   assert.equal(scoreB.nightActivityScore, 0);
 
-  // Route C has confirmed closed places -> scored with low score
-  assert.equal(scoreC.dataStatus, "scored");
-  assert.ok(scoreC.nightActivityScore < scoreA.nightActivityScore);
+  // Route C has confirmed closed places -> with only 1 closed shop, evidence threshold is NOT met
+  assert.equal(scoreC.dataStatus, "insufficient-data", "Single closed shop with no other evidence must be insufficient-data");
+  assert.equal(scoreC.nightActivityScore, 0);
 
-  // Ensure factors and scores are strictly different
+  // Ensure factors and scores reflect genuine evidence
   assert.notEqual(scoreA.nightActivityScore, scoreB.nightActivityScore);
   assert.notEqual(scoreA.nightActivityScore, scoreC.nightActivityScore);
+});
+
+test("Audit Phase 4: Single closed venue with no other evidence produces insufficient-data status", () => {
+  const geom: [number, number][] = [[18.52, 73.85], [18.53, 73.86]];
+  const singleClosedPlace: MappedPlace[] = [
+    {
+      id: "c1",
+      name: "Day Closed Bakery",
+      category: "shop_food",
+      lat: 18.525,
+      lng: 73.855,
+      openingStatus: "closed",
+      distanceAlongRouteMeters: 400,
+    },
+  ];
+
+  const analysis = analyzeRouteDistributionAndGaps(geom, 1500, singleClosedPlace, [], 3, 0.4);
+  const result = calculateNightActivityScore(analysis, "foot", singleClosedPlace, false);
+
+  assert.equal(result.dataStatus, "insufficient-data", "Single closed place is inadequate to assess night route activity");
+  assert.equal(result.nightActivityScore, 0);
+});
+
+test("Audit Phase 4: Corridor with at least two confirmed places (e.g. 2 closed) meets usable threshold", () => {
+  const geom: [number, number][] = [[18.52, 73.85], [18.53, 73.86]];
+  const twoClosedPlaces: MappedPlace[] = [
+    { id: "c1", name: "Closed Bakery", category: "shop_food", lat: 18.522, lng: 73.852, openingStatus: "closed", distanceAlongRouteMeters: 300 },
+    { id: "c2", name: "Closed Stationery", category: "shop_food", lat: 18.527, lng: 73.857, openingStatus: "closed", distanceAlongRouteMeters: 900 },
+  ];
+
+  const analysis = analyzeRouteDistributionAndGaps(geom, 1500, twoClosedPlaces, [], 3, 0.4);
+  const result = calculateNightActivityScore(analysis, "foot", twoClosedPlaces, false);
+
+  assert.equal(result.dataStatus, "scored", "Two confirmed places establish sufficient evidence to score corridor");
+  assert.ok(result.nightActivityScore >= 5, "Score should be floored to 5 when scored");
 });
 
 test("Audit Phase 3: Legitimately equal routes produce equal scores deterministically", () => {
