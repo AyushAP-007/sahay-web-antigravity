@@ -42,6 +42,10 @@ export interface PlannedRoute {
   distanceMeters: number;
   durationSeconds: number;
   safetyScore: number;
+  provisionalScore?: number;
+  provisionalLabel?: string;
+  isHighestScoring?: boolean;
+  isFastest?: boolean;
   nightActivityScore?: number;
   dataStatus?: "scored" | "insufficient-data";
   confidence?: "high" | "medium" | "low";

@@ -97,6 +97,8 @@ function JourneyScreen() {
         <RouteMap
           routes={active.selectedRoute ? [active.selectedRoute] : []}
           selectedId={active.selectedRoute?.id ?? null}
+          places={active.selectedRoute?.placesAlongRoute ?? []}
+          cameras={active.selectedRoute?.camerasAlongRoute ?? []}
         />
         <Panel className="gap-3 bg-secondary shadow-none">
           <div className="flex items-center justify-between">
@@ -737,9 +739,16 @@ function Planner({
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     {route.dataStatus === "insufficient-data" ? (
-                      <Badge tone="neutral">
-                        Insufficient mapped data
-                      </Badge>
+                      <>
+                        <Badge tone="neutral">
+                          Insufficient mapped data
+                        </Badge>
+                        {route.provisionalScore !== undefined ? (
+                          <span className="text-[10px] font-medium text-muted-fg">
+                            Provisional score: {route.provisionalScore}/100
+                          </span>
+                        ) : null}
+                      </>
                     ) : (
                       <Badge tone={badgeTone}>
                         Night Activity {scoreVal}/100
@@ -784,10 +793,15 @@ function Planner({
                       value: `${ga.totalOpenHelpPoints}`,
                     });
                   }
-                  if (ga.longestLowActivityGapMeters > 0) {
+                  if (ga.totalPlacesFound > 0 && ga.longestLowActivityGapMeters > 0) {
                     items.push({
                       label: "Longest activity gap",
                       value: formatKm(ga.longestLowActivityGapMeters),
+                    });
+                  } else if (ga.totalPlacesFound === 0) {
+                    items.push({
+                      label: "Activity gap",
+                      value: "Unknown (no mapped POIs)",
                     });
                   }
                   if (route.hasCameraData && ga.cameraCount > 0) {

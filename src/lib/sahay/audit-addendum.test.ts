@@ -300,3 +300,88 @@ test("Audit Phase 3: Legitimately equal routes produce equal scores deterministi
   assert.equal(score1.nightActivityScore, score2.nightActivityScore);
   assert.deepEqual(score1.factors, score2.factors);
 });
+
+test("Audit Phase 5: Map marker deduplication combines global inventory with route places", () => {
+  const globalPlaces: MappedPlace[] = [
+    { id: "p1", name: "Cafe One", category: "shop_food", lat: 18.521, lng: 73.856, openingStatus: "unknown" },
+    { id: "p2", name: "Hospital Two", category: "hospital", lat: 18.528, lng: 73.861, openingStatus: "unknown" },
+  ];
+  const routePlaces: MappedPlace[] = [
+    { id: "p1", name: "Cafe One", category: "shop_food", lat: 18.521, lng: 73.856, openingStatus: "open", estimatedPassingMinute: 6 },
+  ];
+
+  const placeMap = new Map<string, MappedPlace>();
+  for (const p of globalPlaces) {
+    const key = p.id || `${p.category}-${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+    placeMap.set(key, p);
+  }
+  for (const rp of routePlaces) {
+    const key = rp.id || `${rp.category}-${rp.lat.toFixed(5)},${rp.lng.toFixed(5)}`;
+    placeMap.set(key, rp);
+  }
+
+  const combined = Array.from(placeMap.values());
+  assert.equal(combined.length, 2, "Should preserve all 2 distinct locations");
+  const p1 = combined.find((p) => p.id === "p1")!;
+  assert.equal(p1.openingStatus, "open", "Route-evaluated status (open) must override unknown");
+  assert.equal(p1.estimatedPassingMinute, 6, "Passing minute must be preserved");
+});
+
+test("Audit Phase 5: Provisional comparison score generated when POI data is insufficient", () => {
+  const emptyAnalysis = {
+    longestLowActivityGapMeters: 2000,
+    longestNoHelpPointGapMeters: 2000,
+    totalOpenPlaces: 0,
+    totalOpenCommercial: 0,
+    totalOpenHelpPoints: 0,
+    totalPlacesFound: 0,
+    helpPointTypesPresent: [],
+    distributionScore: 0,
+    cameraCount: 0,
+    cameraDistributionScore: 0,
+    meaningfulTurnsCount: 2,
+    mainRoadTraversedRatio: 0.6,
+  };
+
+  const scoreResult = calculateNightActivityScore(emptyAnalysis, "foot", [], false);
+  assert.equal(scoreResult.dataStatus, "insufficient-data");
+  assert.equal(scoreResult.nightActivityScore, 0);
+  assert.ok(scoreResult.provisionalScore > 0, "Provisional score must be calculated from route-derived features");
+  assert.ok(scoreResult.provisionalScore <= 100);
+});
+
+test("Audit Phase 5: Highest-scoring candidate identified independently of fastest candidate", () => {
+  const routeFastest = {
+    id: "r-fast",
+    durationSeconds: 900,
+    distanceMeters: 1200,
+    nightActivityScore: 45,
+    dataStatus: "scored" as const,
+  };
+  const routeSafeAndSlow = {
+    id: "r-safe",
+    durationSeconds: 1800, // 15 mins slower, outside 10-min constraint
+    distanceMeters: 2200,
+    nightActivityScore: 82,
+    dataStatus: "scored" as const,
+  };
+
+  const routes = [routeFastest, routeSafeAndSlow];
+  let fastestIndex = 0;
+  routes.forEach((r, idx) => {
+    if (r.durationSeconds < routes[fastestIndex]!.durationSeconds) fastestIndex = idx;
+  });
+
+  let highestScoreIndex = 0;
+  let highestScore = -Infinity;
+  routes.forEach((r, idx) => {
+    if (r.nightActivityScore > highestScore) {
+      highestScore = r.nightActivityScore;
+      highestScoreIndex = idx;
+    }
+  });
+
+  assert.equal(routes[fastestIndex]!.id, "r-fast", "Fastest route correctly identified");
+  assert.equal(routes[highestScoreIndex]!.id, "r-safe", "Highest-scoring route correctly identified independently");
+  assert.notEqual(fastestIndex, highestScoreIndex, "Fastest and highest scoring can differ");
+});

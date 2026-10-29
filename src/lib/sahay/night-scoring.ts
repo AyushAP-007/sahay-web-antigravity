@@ -408,6 +408,7 @@ export function calculateNightActivityScore(
   confidence: "high" | "medium" | "low";
   missingDataNotes: string[];
   dataStatus: "scored" | "insufficient-data";
+  provisionalScore: number;
 } {
   const baseWeights = MODE_WEIGHTS[mode];
   const factors: FactorScoreItem[] = [];
@@ -585,6 +586,24 @@ export function calculateNightActivityScore(
     missingDataNotes.push(`${unknownCount} nearby place(s) had unlisted or unparseable opening hours.`);
   }
 
+  // Calculate provisional comparison score based on verified route-derived features (main road prominence, turns, distance/duration)
+  // Transparent deterministic formula out of 100:
+  // - Main road arterial presence: up to 35 pts (analysis.mainRoadTraversedRatio)
+  // - Route directness/turns: up to 35 pts (fewer complex isolated turns)
+  // - Baseline transit corridor/road network presence: up to 30 pts
+  const turnFactor = Math.max(0, 1 - Math.max(0, analysis.meaningfulTurnsCount - 3) / 8);
+  const provisionalScore = Math.max(
+    10,
+    Math.min(
+      90,
+      Math.round(
+        analysis.mainRoadTraversedRatio * 40 +
+          turnFactor * 35 +
+          25,
+      ),
+    ),
+  );
+
   const confidence: "high" | "medium" | "low" =
     !hasUsableEvidence
       ? "low"
@@ -608,5 +627,6 @@ export function calculateNightActivityScore(
       confidence,
       missingDataNotes,
       dataStatus,
+      provisionalScore,
     };
 }

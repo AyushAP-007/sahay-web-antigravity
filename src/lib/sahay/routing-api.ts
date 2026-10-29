@@ -319,7 +319,7 @@ export async function fetchMultiPathRoutes(
   };
   const host = hostMap[mode] || hostMap.foot;
 
-  const directUrl = `${host}/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson&steps=true&alternatives=true`;
+  const directUrl = `${host}/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson&steps=true&alternatives=3`;
 
   let providerResponded = false;
   let providerError: Error | null = null;
@@ -359,29 +359,52 @@ export async function fetchMultiPathRoutes(
     throw new Error(describeRouteFailure("network"));
   }
 
-  // Waypoint diversion for alternative arterial corridors if fewer than 4 routes found
+  // Waypoint diversion for alternative arterial corridors if fewer than 3 unique routes found
+  const initialUnique = deduplicateRoutes(candidates);
   const straightDist = haversineMeters(from.lat, from.lng, to.lat, to.lng);
-  if (candidates.length < 5 && straightDist > 250) {
-    const midLat = (from.lat + to.lat) / 2;
-    const midLng = (from.lng + to.lng) / 2;
+  if (initialUnique.length < 3 && straightDist > 250) {
     const dLat = to.lat - from.lat;
     const dLng = to.lng - from.lng;
 
-    const offsetFactor = Math.min(0.007, Math.max(0.0025, (straightDist / 6371000) * 0.7));
+    // Normal unit perpendicular vector to direct path
+    const pathLen = Math.sqrt(dLat * dLat + dLng * dLng);
+    const uLat = -dLng / (pathLen || 1);
+    const uLng = dLat / (pathLen || 1);
 
-    const waypointLeft = {
-      lat: midLat - dLng * 0.45 + (dLng > 0 ? offsetFactor : -offsetFactor),
-      lng: midLng + dLat * 0.45 + (dLat > 0 ? offsetFactor : -offsetFactor),
-    };
-    const waypointRight = {
-      lat: midLat + dLng * 0.45 + (dLng > 0 ? -offsetFactor : offsetFactor),
-      lng: midLng - dLat * 0.45 + (dLat > 0 ? -offsetFactor : offsetFactor),
-    };
+    // Lateral offset distance in degrees (~250m to 700m depending on journey length)
+    const offset = Math.min(0.0065, Math.max(0.0025, (straightDist / 6371000) * 0.5));
 
-    const diversions = [waypointLeft, waypointRight];
+    // Try multiple strategic waypoint positions (midpoint left/right, 1/3 and 2/3 along corridor)
+    const diversions = [
+      // Midpoint offsets
+      {
+        lat: (from.lat + to.lat) / 2 + uLat * offset,
+        lng: (from.lng + to.lng) / 2 + uLng * offset,
+      },
+      {
+        lat: (from.lat + to.lat) / 2 - uLat * offset,
+        lng: (from.lng + to.lng) / 2 - uLng * offset,
+      },
+      // 1/3 point left offset
+      {
+        lat: from.lat + dLat * 0.33 + uLat * (offset * 0.8),
+        lng: from.lng + dLng * 0.33 + uLng * (offset * 0.8),
+      },
+      // 2/3 point right offset
+      {
+        lat: from.lat + dLat * 0.67 - uLat * (offset * 0.8),
+        lng: from.lng + dLng * 0.67 - uLng * (offset * 0.8),
+      },
+    ];
 
     for (let i = 0; i < diversions.length; i++) {
+      // Check if we already have 3 unique routes
+      if (deduplicateRoutes(candidates).length >= 3) break;
+
       const wp = diversions[i]!;
+      // Bounds check: diversion waypoint must be within Pune bounds
+      if (!isWithinPune(wp.lat, wp.lng)) continue;
+
       const viaPath = `${from.lng},${from.lat};${wp.lng.toFixed(5)},${wp.lat.toFixed(5)};${to.lng},${to.lat}`;
       const viaUrl = `${host}/route/v1/driving/${viaPath}?overview=full&geometries=geojson&steps=true`;
 
@@ -389,10 +412,11 @@ export async function fetchMultiPathRoutes(
         const viaRes = await fetchJson<{ code?: string; routes?: OsrmRoute[] }>(
           viaUrl,
           {},
-          10000,
+          8000,
         );
         if (viaRes.code === "Ok" && viaRes.routes?.[0]?.geometry?.coordinates) {
           const r = viaRes.routes[0];
+          // Reasonable detour threshold (at most 2.2x straight distance)
           if (r.distance < straightDist * 2.2 && r.geometry?.coordinates) {
             candidates.push({
               id: `via-${i}`,
@@ -409,7 +433,7 @@ export async function fetchMultiPathRoutes(
           }
         }
       } catch {
-        // Diversion route unreachable
+        // Diversion route unreachable; continue to next waypoint
       }
     }
   }
@@ -489,10 +513,11 @@ export async function loadPuneCategorizedPlaces(
   await Promise.allSettled(
     photonCategories.map(async (cq, idx) => {
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}&limit=12&osm_tag=${encodeURIComponent(cq.osmTag)}`;
+        const bboxParam = `&bbox=${west.toFixed(4)},${south.toFixed(4)},${east.toFixed(4)},${north.toFixed(4)}`;
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(cq.query)}&lat=${centerLat}&lon=${centerLng}${bboxParam}&limit=15&osm_tag=${encodeURIComponent(cq.osmTag)}`;
         const payload = await fetchJson<{
           features?: PhotonFeature[];
-        }>(url, {}, 4000);
+        }>(url, {}, 4500);
 
         successCount += 1;
         for (const f of payload.features ?? []) {
@@ -678,6 +703,7 @@ export async function planSafeRoutes(input: {
       ...route,
       nightActivityScore: scoring.nightActivityScore,
       dataStatus: scoring.dataStatus,
+      provisionalScore: scoring.provisionalScore,
       factors: scoring.factors,
       gapAnalysis,
       placesAlongRoute: placesAlong,
@@ -693,8 +719,10 @@ export async function planSafeRoutes(input: {
     };
   });
 
-  // Apply Section 10: Fastest vs Night-Activity-Favoured comparison
-  // 1. Fastest candidate
+  // Check if ANY route has verified scored data status
+  const anyScored = enhancedRoutes.some((r) => r.dataStatus === "scored");
+
+  // 1. Identify Fastest candidate (shortest duration)
   let fastestIndex = 0;
   enhancedRoutes.forEach((r, idx) => {
     if (r.durationSeconds < enhancedRoutes[fastestIndex]!.durationSeconds) {
@@ -702,42 +730,88 @@ export async function planSafeRoutes(input: {
     }
   });
 
-  // 2. Night activity-favoured candidate within 10-minute constraint of fastest
-  const fastestDurationSec = enhancedRoutes[fastestIndex]!.durationSeconds;
-  const maxAllowedDurationSec = fastestDurationSec + 10 * 60; // 10 minutes constraint
-
-  let bestActivityIndex = -1;
-  let bestScore = -Infinity;
+  // 2. Identify Highest-scoring candidate (WITHOUT duration constraint)
+  let highestScoreIndex = 0;
+  let highestComparableScore = -Infinity;
 
   enhancedRoutes.forEach((r, idx) => {
-    const isWithin10Min = r.durationSeconds <= maxAllowedDurationSec;
-    const score = r.nightActivityScore ?? r.safetyScore;
-    if (isWithin10Min && score > bestScore) {
-      bestScore = score;
-      bestActivityIndex = idx;
+    // If scored data exists on some routes, compare nightActivityScore for scored routes
+    // If all are insufficient-data, compare provisionalScore
+    const compScore = anyScored
+      ? (r.dataStatus === "scored" ? (r.nightActivityScore ?? 0) : -1)
+      : (r.provisionalScore ?? r.safetyScore);
+    if (compScore > highestComparableScore) {
+      highestComparableScore = compScore;
+      highestScoreIndex = idx;
     }
   });
 
-  if (bestActivityIndex === -1) {
-    bestActivityIndex = fastestIndex;
-  }
+  // 3. Identify Recommended candidate (best activity/safety within 10-minute constraint of fastest)
+  const fastestDurationSec = enhancedRoutes[fastestIndex]!.durationSeconds;
+  const maxAllowedDurationSec = fastestDurationSec + 10 * 60; // 10 minutes constraint
 
-  // Label the candidates honestly
+  let recommendedIndex = fastestIndex;
+  let bestConstrainedScore = -Infinity;
+
   enhancedRoutes.forEach((r, idx) => {
-    if (idx === fastestIndex && idx === bestActivityIndex) {
-      r.objective = "recommended";
-      r.objectiveLabel = "Recommended activity route (also fastest)";
-      r.kind = "safest";
-    } else if (idx === bestActivityIndex) {
-      r.objective = "safety-focused";
-      r.objectiveLabel = "Night activity-favoured";
-      r.kind = "safest";
-    } else if (idx === fastestIndex) {
-      r.objective = "fastest";
-      r.objectiveLabel = "Fastest";
-      r.kind = "shortest";
+    const isWithin10Min = r.durationSeconds <= maxAllowedDurationSec;
+    const compScore = anyScored
+      ? (r.dataStatus === "scored" ? (r.nightActivityScore ?? 0) : -1)
+      : (r.provisionalScore ?? r.safetyScore);
+    if (isWithin10Min && compScore > bestConstrainedScore) {
+      bestConstrainedScore = compScore;
+      recommendedIndex = idx;
+    }
+  });
+
+  // Mark metadata on candidates transparently
+  enhancedRoutes.forEach((r, idx) => {
+    r.isFastest = idx === fastestIndex;
+    r.isHighestScoring = idx === highestScoreIndex;
+
+    if (!anyScored) {
+      // All routes have insufficient mapped POI data: use provisional route-comparison labels
+      r.provisionalLabel = `Provisional Route Comparison: ${r.provisionalScore}/100`;
+      if (idx === fastestIndex && idx === highestScoreIndex) {
+        r.objective = "recommended";
+        r.objectiveLabel = "Fastest (highest provisional score)";
+        r.kind = "safest";
+      } else if (idx === fastestIndex) {
+        r.objective = "fastest";
+        r.objectiveLabel = "Fastest";
+        r.kind = "shortest";
+      } else if (idx === highestScoreIndex) {
+        r.objective = "safety-focused";
+        r.objectiveLabel = "Highest provisional score";
+        r.kind = "safest";
+      } else {
+        r.objectiveLabel = `Alternative ${mode}`;
+      }
     } else {
-      r.objectiveLabel = `Alternative ${mode}`;
+      // Scored POI data exists
+      if (idx === fastestIndex && idx === recommendedIndex && idx === highestScoreIndex) {
+        r.objective = "recommended";
+        r.objectiveLabel = "Recommended activity route (also fastest)";
+        r.kind = "safest";
+      } else if (idx === recommendedIndex && idx === fastestIndex) {
+        r.objective = "recommended";
+        r.objectiveLabel = "Recommended (fastest)";
+        r.kind = "safest";
+      } else if (idx === recommendedIndex) {
+        r.objective = "recommended";
+        r.objectiveLabel = "Recommended activity route";
+        r.kind = "safest";
+      } else if (idx === highestScoreIndex) {
+        r.objective = "safety-focused";
+        r.objectiveLabel = "Highest activity score";
+        r.kind = "safest";
+      } else if (idx === fastestIndex) {
+        r.objective = "fastest";
+        r.objectiveLabel = "Fastest";
+        r.kind = "shortest";
+      } else {
+        r.objectiveLabel = `Alternative ${mode}`;
+      }
     }
   });
 

@@ -135,9 +135,24 @@ export function RouteMap({
         bounds.extend(line.getBounds());
       }
 
-      // 2. Render Categorized Place Markers along route
-      // Only render places if the selected route has them or if places explicitly supplied
-      const placesToRender = selected.placesAlongRoute ?? places;
+      // 2. Render Categorized Place Markers
+      // Always merge selected route places (which carry opening status & passing times)
+      // with broader map places so markers remain visible even when the route itself has 0 places.
+      const routePlaces = selected.placesAlongRoute ?? [];
+      const placeMap = new Map<string, MappedPlace>();
+
+      // Seed with broader places inventory first
+      for (const p of places) {
+        const key = p.id || `${p.category}-${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+        placeMap.set(key, p);
+      }
+      // Overwrite/enrich with route-evaluated places (which have openingStatus, passing time, etc.)
+      for (const rp of routePlaces) {
+        const key = rp.id || `${rp.category}-${rp.lat.toFixed(5)},${rp.lng.toFixed(5)}`;
+        placeMap.set(key, rp);
+      }
+
+      const placesToRender = Array.from(placeMap.values());
 
       for (const p of placesToRender) {
         let visible = false;
@@ -202,9 +217,19 @@ export function RouteMap({
         }
       }
 
-      // 3. Render Cameras along route
+      // 3. Render Cameras
       if (layers.cameras) {
-        const camsToRender = selected.camerasAlongRoute ?? cameras;
+        const routeCams = selected.camerasAlongRoute ?? [];
+        const camMap = new Map<string, MappedPlace>();
+        for (const c of cameras) {
+          const key = c.id || `cam-${c.lat.toFixed(5)},${c.lng.toFixed(5)}`;
+          camMap.set(key, c);
+        }
+        for (const rc of routeCams) {
+          const key = rc.id || `cam-${rc.lat.toFixed(5)},${rc.lng.toFixed(5)}`;
+          camMap.set(key, rc);
+        }
+        const camsToRender = Array.from(camMap.values());
 
         for (const cam of camsToRender) {
           const camMarker = L.circleMarker([cam.lat, cam.lng], {
