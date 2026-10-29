@@ -105,14 +105,12 @@ function JourneyScreen() {
             <p className="text-[9px] font-bold tracking-[0.14em] text-secondary-fg">
               IN PROGRESS
             </p>
-            <Badge tone={active.offRouteSimulated ? "warning" : active.selectedRoute?.dataStatus === "insufficient-data" ? "neutral" : "success"}>
-              {active.selectedRoute?.dataStatus === "insufficient-data"
-                ? "Insufficient mapped data"
-                : active.selectedRoute?.nightActivityScore !== undefined
-                  ? `Night Activity ${active.selectedRoute.nightActivityScore}/100`
-                  : active.offRouteSimulated
-                    ? "Off-route demo"
-                    : "On watch"}
+            <Badge tone={active.offRouteSimulated ? "warning" : "success"}>
+              {active.selectedRoute
+                ? `Route Safety Index: ${(active.selectedRoute.routeSafetyIndex ?? active.selectedRoute.nightActivityScore ?? active.selectedRoute.safetyScore)}/100`
+                : active.offRouteSimulated
+                  ? "Off-route demo"
+                  : "On watch"}
             </Badge>
           </div>
           <p className="font-display text-xl font-semibold tracking-[-0.03em] text-fg">
@@ -122,10 +120,9 @@ function JourneyScreen() {
             <p className="text-[11px] text-muted-fg">
               {formatWalkTime(active.selectedRoute.durationSeconds)} ·{" "}
               {formatKm(active.selectedRoute.distanceMeters)} ·{" "}
-              {active.selectedRoute.dataStatus === "insufficient-data"
-                ? "Insufficient mapped data"
-                : `Night Activity Score ${active.selectedRoute.nightActivityScore ?? active.selectedRoute.safetyScore}/100`}.
-              {" "}This indicates mapped activity & access points, not guaranteed safety.
+              Route Safety Index: {(active.selectedRoute.routeSafetyIndex ?? active.selectedRoute.nightActivityScore ?? active.selectedRoute.safetyScore)}/100
+              {active.selectedRoute.dataStatus === "insufficient-data" ? " (Low data coverage)" : ""}.
+              {" "}This index assesses mapped infrastructure & activity, not guaranteed safety.
             </p>
           ) : null}
           <div className="flex items-center gap-2 rounded-2xl bg-card/60 px-3 py-2 text-xs text-fg">
@@ -407,11 +404,12 @@ function Planner({
     }
     setBusy("start");
     try {
+      const routeScore = selected.routeSafetyIndex ?? selected.nightActivityScore ?? selected.safetyScore;
       await onStart({
         originLabel: from.label,
         destinationLabel: to.label,
         expectedMinutes: Math.max(1, Math.round(selected.durationSeconds / 60)),
-        notes: `Night Activity Score: ${selected.nightActivityScore ?? selected.safetyScore}/100. ${selected.reasons.join(" · ")}`,
+        notes: `Route Safety Index: ${routeScore}/100. ${selected.reasons.join(" · ")}`,
         originLat: from.lat,
         originLng: from.lng,
         destLat: to.lat,
@@ -429,17 +427,17 @@ function Planner({
 
   return (
     <SahayShell
-      title="Night Activity Journey"
-      subtitle="Compare Pune routes with time-aware opening hours and activity indicators."
+      title="Route Safety Journey"
+      subtitle="Compare Pune routes with comprehensive infrastructure, activity, and road metrics."
     >
       {/* Notice Banner */}
       <Panel className="flex-row items-start gap-2.5 bg-secondary/50">
         <Info className="mt-0.5 size-4 shrink-0 text-primary" />
         <div className="space-y-1">
           <HelperText>
-            <strong>Night Activity Score (out of 100):</strong> Measures open commercial spots,
-            help points, road characteristics, and camera distribution along each route at your
-            chosen time. <em>This is an activity & access indicator, not a guarantee of safety or probability of harm.</em>
+            <strong>Route Safety Index (out of 100):</strong> Evaluates commercial presence,
+            help points, arterial road infrastructure, transit stops, and camera records along each route at your
+            chosen time. <em>This is an evidence-based infrastructure & activity indicator, not a guarantee of safety or probability of harm.</em>
           </HelperText>
           <button
             type="button"
@@ -461,7 +459,7 @@ function Planner({
           >
             <X className="size-4" />
           </button>
-          <p className="text-sm font-bold text-fg">Night Activity Guide & Legend</p>
+          <p className="text-sm font-bold text-fg">Route Safety Index Guide & Legend</p>
           <div className="space-y-2 text-xs text-muted-fg">
             <p>
               <strong>Map Marker Colors:</strong>
@@ -476,7 +474,7 @@ function Planner({
               <span className="flex items-center gap-1.5"><span className="size-3 rounded-full bg-[#475569]" /> Surveillance Cameras</span>
             </div>
             <p className="pt-2">
-              <strong>How Night Activity Scoring Works:</strong> Open commercial venues and 24/7 help points give traveller presence and assistance. Fewer long dark stretches and direct streets improve the score. Mapped camera presence is noted but never guaranteed active.
+              <strong>How the Route Safety Index Works:</strong> A comprehensive 0–100 index evaluated across open commercial venues, 24/7 help points, arterial road prominence, transit hubs, activity distribution, route complexity, and camera presence. When POI telemetry is sparse, infrastructure and route parameters determine the score while confidence is marked accordingly.
             </p>
           </div>
         </Panel>
@@ -697,7 +695,7 @@ function Planner({
           {/* Compared Route Cards */}
           {routes.map((route) => {
             const active = route.id === selected?.id;
-            const scoreVal = route.nightActivityScore ?? route.safetyScore;
+            const scoreVal = route.routeSafetyIndex ?? route.nightActivityScore ?? route.safetyScore;
             const badgeTone =
               scoreVal >= 65 ? "success" : scoreVal >= 40 ? "neutral" : "warning";
 
@@ -724,7 +722,7 @@ function Planner({
                       </p>
                       {route.objective === "recommended" ? (
                         <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                          Best balance
+                          Recommended
                         </span>
                       ) : null}
                     </div>
@@ -738,22 +736,9 @@ function Planner({
                     </p>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    {route.dataStatus === "insufficient-data" ? (
-                      <>
-                        <Badge tone="neutral">
-                          Insufficient mapped data
-                        </Badge>
-                        {route.provisionalScore !== undefined ? (
-                          <span className="text-[10px] font-medium text-muted-fg">
-                            Provisional score: {route.provisionalScore}/100
-                          </span>
-                        ) : null}
-                      </>
-                    ) : (
-                      <Badge tone={badgeTone}>
-                        Night Activity {scoreVal}/100
-                      </Badge>
-                    )}
+                    <Badge tone={badgeTone}>
+                      Route Safety Index: {scoreVal}/100
+                    </Badge>
                     <span className="text-[10px] uppercase tracking-wider text-muted-fg">
                       {route.confidence ? `${route.confidence} coverage` : "heuristic"}
                     </span>

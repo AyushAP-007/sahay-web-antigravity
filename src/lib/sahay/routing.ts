@@ -41,12 +41,13 @@ export interface PlannedRoute {
   mode: "foot" | "bike" | "car";
   distanceMeters: number;
   durationSeconds: number;
-  safetyScore: number;
-  provisionalScore?: number;
+  routeSafetyIndex?: number; // Authoritative 0-100 index
+  safetyScore: number; // Retained for compatibility
+  nightActivityScore?: number; // Legacy compatibility
+  provisionalScore?: number; // Legacy compatibility
   provisionalLabel?: string;
   isHighestScoring?: boolean;
   isFastest?: boolean;
-  nightActivityScore?: number;
   dataStatus?: "scored" | "insufficient-data";
   confidence?: "high" | "medium" | "low";
   detourMeters?: number;
@@ -572,6 +573,7 @@ export function rankAndCategorizeRoutes(
       mode: candidate.mode,
       distanceMeters: candidate.distanceMeters,
       durationSeconds: candidate.durationSeconds,
+      routeSafetyIndex: assessment.score,
       safetyScore: assessment.score,
       confidence: assessment.breakdown.coverageConfidence,
       detourMeters,

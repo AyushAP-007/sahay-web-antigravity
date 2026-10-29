@@ -104,9 +104,8 @@ export function toIstLocalDate(date: Date): Date {
   return new Date(istString);
 }
 
-/**
- * Parses OpenStreetMap opening_hours string using robust npm library for IST time.
- */
+// Backward compatibility alias for Route Safety Index
+export const calculateRouteSafetyIndex = calculateNightActivityScore;
 export function checkOpeningHoursStatus(
   openingHoursStr: string | undefined,
   targetDate: Date,
@@ -403,6 +402,7 @@ export function calculateNightActivityScore(
   placesAlongRoute: MappedPlace[],
   hasCameraData: boolean,
 ): {
+  routeSafetyIndex: number;
   nightActivityScore: number;
   factors: FactorScoreItem[];
   confidence: "high" | "medium" | "low";
@@ -478,8 +478,8 @@ export function calculateNightActivityScore(
     name: "Main-Road Prominence",
     score: mainRoadScore,
     maxScore: weights.mainRoadCoverage,
-    description: "Proportion of route traversing primary/secondary arterial corridors (proxy for prominence, not guaranteed lighting).",
-    evidence: `${Math.round(analysis.mainRoadTraversedRatio * 100)}% on mapped primary/arterial roads.`,
+    description: "Proportion of route traversing primary/secondary arterial corridors (proxy for prominence, infrastructure, and passive observation).",
+    evidence: `${Math.round(analysis.mainRoadTraversedRatio * 100)}% on mapped primary/arterial roads (heuristic match).`,
   });
 
   // 4. Open Transport Locations
@@ -504,8 +504,11 @@ export function calculateNightActivityScore(
     name: "Even Activity Distribution",
     score: gapScore,
     maxScore: weights.fewerGaps,
-    description: "Even distribution of open places with fewer long dark or unpopulated stretches.",
-    evidence: `Longest stretch without open activity: ${analysis.longestLowActivityGapMeters}m. ${Math.round(analysis.distributionScore * 100)}% segments populated.`,
+    description: "Even distribution of open places with fewer dark or unpopulated stretches.",
+    evidence:
+      analysis.totalPlacesFound > 0
+        ? `Longest stretch without open activity: ${analysis.longestLowActivityGapMeters}m. ${Math.round(analysis.distributionScore * 100)}% segments populated.`
+        : "No route-associated POIs mapped; gap distribution cannot be verified from POI telemetry.",
   });
 
   // 6. Fewer Turns
@@ -546,6 +549,7 @@ export function calculateNightActivityScore(
 
   // Calculate sum of factor scores
   const totalScore = factors.reduce((acc, f) => acc + f.score, 0);
+  const routeSafetyIndex = Math.max(0, Math.min(100, totalScore));
 
   // Count place data states
   const totalPlaces = placesAlongRoute.length;
@@ -553,15 +557,6 @@ export function calculateNightActivityScore(
   const closedCount = placesAlongRoute.filter((p) => p.openingStatus === "closed").length;
   const unknownCount = placesAlongRoute.filter((p) => p.openingStatus === "unknown").length;
 
-  // Defensible evidence threshold for night activity scoring:
-  // A single closed shop or places with unverified hours do NOT provide sufficient telemetry
-  // to evaluate night activity along a route corridor.
-  // Genuine usable evidence requires:
-  // 1) Confirmed-open commercial venues or help points, OR
-  // 2) Mapped cameras in the corridor (when camera provider is available), OR
-  // 3) A verifiable multi-point sample (at least 2 confirmed open/closed places, OR at least 4 total mapped places).
-  // Routes with only 1 closed venue and 0 open places, or routes with 1-3 places whose hours are all unknown,
-  // do NOT meet the threshold and are marked "insufficient-data" (score 0, not floored to 5/100).
   const confirmedPlaces = openCount + closedCount;
   const hasUsableEvidence =
     openCount >= 1 ||
@@ -573,36 +568,18 @@ export function calculateNightActivityScore(
 
   const dataStatus: "scored" | "insufficient-data" = hasUsableEvidence ? "scored" : "insufficient-data";
 
-  // When usable evidence is insufficient, do NOT floor to 5/100
-  const finalScore = hasUsableEvidence ? Math.max(5, Math.min(98, totalScore)) : 0;
+  // For backward compatibility: legacy nightActivityScore was 0 on insufficient-data
+  const legacyNightScore = hasUsableEvidence ? Math.max(5, Math.min(98, totalScore)) : 0;
 
   if (dataStatus === "insufficient-data") {
     missingDataNotes.unshift(
       totalPlaces > 0
-        ? `Found ${totalPlaces} nearby place(s), but none have verified opening schedules or usable safety telemetry. Evidence is insufficient for a reliable Night Activity Score.`
-        : "Insufficient mapped POI evidence along this route corridor to compute a reliable Night Activity Score.",
+        ? `Found ${totalPlaces} nearby place(s), but none have verified opening schedules or usable safety telemetry. Route Safety Index relies on available infrastructure parameters.`
+        : "Insufficient mapped POI evidence along this route corridor; Route Safety Index relies on available road infrastructure parameters.",
     );
   } else if (unknownCount > 0) {
     missingDataNotes.push(`${unknownCount} nearby place(s) had unlisted or unparseable opening hours.`);
   }
-
-  // Calculate provisional comparison score based on verified route-derived features (main road prominence, turns, distance/duration)
-  // Transparent deterministic formula out of 100:
-  // - Main road arterial presence: up to 35 pts (analysis.mainRoadTraversedRatio)
-  // - Route directness/turns: up to 35 pts (fewer complex isolated turns)
-  // - Baseline transit corridor/road network presence: up to 30 pts
-  const turnFactor = Math.max(0, 1 - Math.max(0, analysis.meaningfulTurnsCount - 3) / 8);
-  const provisionalScore = Math.max(
-    10,
-    Math.min(
-      90,
-      Math.round(
-        analysis.mainRoadTraversedRatio * 40 +
-          turnFactor * 35 +
-          25,
-      ),
-    ),
-  );
 
   const confidence: "high" | "medium" | "low" =
     !hasUsableEvidence
@@ -613,20 +590,21 @@ export function calculateNightActivityScore(
           ? "low"
           : "medium";
 
-    if (hasCameraData) {
-      if (analysis.cameraCount === 0) {
-        missingDataNotes.push("Zero surveillance cameras mapped in OpenStreetMap along this route; actual street coverage may be unmapped.");
-      } else {
-        missingDataNotes.push("Mapped cameras indicate OSM records only; live recording, maintenance, or monitoring is not guaranteed.");
-      }
+  if (hasCameraData) {
+    if (analysis.cameraCount === 0) {
+      missingDataNotes.push("Zero surveillance cameras mapped in OpenStreetMap along this route; actual street coverage may be unmapped.");
+    } else {
+      missingDataNotes.push("Mapped cameras indicate OSM records only; live recording, maintenance, or monitoring is not guaranteed.");
     }
+  }
 
-    return {
-      nightActivityScore: finalScore,
-      factors,
-      confidence,
-      missingDataNotes,
-      dataStatus,
-      provisionalScore,
-    };
+  return {
+    routeSafetyIndex,
+    nightActivityScore: legacyNightScore, // Backward compatibility for legacy tests
+    factors,
+    confidence,
+    missingDataNotes,
+    dataStatus,
+    provisionalScore: routeSafetyIndex, // Backward compatibility
+  };
 }

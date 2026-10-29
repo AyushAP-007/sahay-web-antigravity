@@ -385,3 +385,49 @@ test("Audit Phase 5: Highest-scoring candidate identified independently of faste
   assert.equal(routes[highestScoreIndex]!.id, "r-safe", "Highest-scoring route correctly identified independently");
   assert.notEqual(fastestIndex, highestScoreIndex, "Fastest and highest scoring can differ");
 });
+
+test("Phase 6: Unified Route Safety Index (0-100) and factor consistency across modes and data states", () => {
+  const geom: [number, number][] = [[18.52, 73.85], [18.53, 73.86], [18.54, 73.87]];
+  const placesWithHospitalAndCafe: MappedPlace[] = [
+    { id: "h1", name: "Ruby Hall Clinic", category: "hospital", lat: 18.525, lng: 73.855, openingStatus: "open", distanceAlongRouteMeters: 500 },
+    { id: "c1", name: "FC Road Cafe", category: "shop_food", lat: 18.535, lng: 73.865, openingStatus: "open", distanceAlongRouteMeters: 1200 },
+  ];
+
+  const analysis = analyzeRouteDistributionAndGaps(geom, 2000, placesWithHospitalAndCafe, [], 2, 0.5);
+
+  // 1. Authoritative Route Safety Index matches factor breakdown sum
+  const resultFoot = calculateNightActivityScore(analysis, "foot", placesWithHospitalAndCafe, false);
+  const factorSum = resultFoot.factors.reduce((sum, f) => sum + f.score, 0);
+  assert.equal(resultFoot.routeSafetyIndex, factorSum, "Route Safety Index must equal the exact sum of factor scores");
+  assert.ok(resultFoot.routeSafetyIndex >= 0 && resultFoot.routeSafetyIndex <= 100);
+
+  // 2. Weights in factor breakdown always sum to exactly 100
+  const maxFactorWeightSum = resultFoot.factors.reduce((sum, f) => sum + f.maxScore, 0);
+  assert.equal(maxFactorWeightSum, 100, "Factor weights must sum to exactly 100");
+
+  // 3. Travel mode specificity: bike, car, foot produce deterministic mode-appropriate scoring
+  const resultBike = calculateNightActivityScore(analysis, "bike", placesWithHospitalAndCafe, false);
+  const resultCar = calculateNightActivityScore(analysis, "car", placesWithHospitalAndCafe, false);
+  assert.ok(resultBike.routeSafetyIndex > 0);
+  assert.ok(resultCar.routeSafetyIndex > 0);
+  assert.equal(resultBike.factors.reduce((sum, f) => sum + f.score, 0), resultBike.routeSafetyIndex);
+  assert.equal(resultCar.factors.reduce((sum, f) => sum + f.score, 0), resultCar.routeSafetyIndex);
+
+  // 4. Missing POI data still yields an explainable Route Safety Index from route infrastructure
+  const emptyAnalysis = analyzeRouteDistributionAndGaps(geom, 2000, [], [], 2, 0.4);
+  const resultEmpty = calculateNightActivityScore(emptyAnalysis, "foot", [], false);
+  assert.equal(resultEmpty.dataStatus, "insufficient-data");
+  assert.ok(resultEmpty.routeSafetyIndex >= 0, "Route Safety Index is computed for every route");
+  assert.equal(resultEmpty.confidence, "low", "Confidence is marked low for insufficient POI data");
+  assert.equal(
+    resultEmpty.routeSafetyIndex,
+    resultEmpty.factors.reduce((sum, f) => sum + f.score, 0),
+    "Factor breakdown sum matches index even when POI data is missing",
+  );
+
+  // 5. Camera data toggle changes max weight normalization cleanly
+  const resultWithCam = calculateNightActivityScore(analysis, "foot", placesWithHospitalAndCafe, true);
+  const camFactor = resultWithCam.factors.find((f) => f.id === "cameras")!;
+  assert.ok(camFactor.maxScore > 0, "Camera max score > 0 when cameras are available");
+  assert.equal(resultWithCam.factors.reduce((sum, f) => sum + f.maxScore, 0), 100);
+});

@@ -691,7 +691,7 @@ export async function planSafeRoutes(input: {
       mainRoadRatio,
     );
 
-    // 4. Night Activity Score
+    // 4. Authoritative Route Safety Index
     const scoring = calculateNightActivityScore(
       gapAnalysis,
       mode,
@@ -701,9 +701,11 @@ export async function planSafeRoutes(input: {
 
     return {
       ...route,
-      nightActivityScore: scoring.nightActivityScore,
+      routeSafetyIndex: scoring.routeSafetyIndex,
+      nightActivityScore: scoring.routeSafetyIndex, // Backward compatibility
+      safetyScore: scoring.routeSafetyIndex, // Align legacy safetyScore
       dataStatus: scoring.dataStatus,
-      provisionalScore: scoring.provisionalScore,
+      provisionalScore: scoring.routeSafetyIndex, // Backward compatibility
       factors: scoring.factors,
       gapAnalysis,
       placesAlongRoute: placesAlong,
@@ -719,9 +721,6 @@ export async function planSafeRoutes(input: {
     };
   });
 
-  // Check if ANY route has verified scored data status
-  const anyScored = enhancedRoutes.some((r) => r.dataStatus === "scored");
-
   // 1. Identify Fastest candidate (shortest duration)
   let fastestIndex = 0;
   enhancedRoutes.forEach((r, idx) => {
@@ -730,23 +729,19 @@ export async function planSafeRoutes(input: {
     }
   });
 
-  // 2. Identify Highest-scoring candidate (WITHOUT duration constraint)
+  // 2. Identify Highest Route Safety Index candidate (evaluated without duration constraint)
   let highestScoreIndex = 0;
-  let highestComparableScore = -Infinity;
+  let highestIndexVal = -Infinity;
 
   enhancedRoutes.forEach((r, idx) => {
-    // If scored data exists on some routes, compare nightActivityScore for scored routes
-    // If all are insufficient-data, compare provisionalScore
-    const compScore = anyScored
-      ? (r.dataStatus === "scored" ? (r.nightActivityScore ?? 0) : -1)
-      : (r.provisionalScore ?? r.safetyScore);
-    if (compScore > highestComparableScore) {
-      highestComparableScore = compScore;
+    const score = r.routeSafetyIndex ?? r.safetyScore;
+    if (score > highestIndexVal) {
+      highestIndexVal = score;
       highestScoreIndex = idx;
     }
   });
 
-  // 3. Identify Recommended candidate (best activity/safety within 10-minute constraint of fastest)
+  // 3. Identify Recommended candidate (best safety index within 10-minute constraint of fastest)
   const fastestDurationSec = enhancedRoutes[fastestIndex]!.durationSeconds;
   const maxAllowedDurationSec = fastestDurationSec + 10 * 60; // 10 minutes constraint
 
@@ -755,11 +750,9 @@ export async function planSafeRoutes(input: {
 
   enhancedRoutes.forEach((r, idx) => {
     const isWithin10Min = r.durationSeconds <= maxAllowedDurationSec;
-    const compScore = anyScored
-      ? (r.dataStatus === "scored" ? (r.nightActivityScore ?? 0) : -1)
-      : (r.provisionalScore ?? r.safetyScore);
-    if (isWithin10Min && compScore > bestConstrainedScore) {
-      bestConstrainedScore = compScore;
+    const score = r.routeSafetyIndex ?? r.safetyScore;
+    if (isWithin10Min && score > bestConstrainedScore) {
+      bestConstrainedScore = score;
       recommendedIndex = idx;
     }
   });
@@ -769,59 +762,40 @@ export async function planSafeRoutes(input: {
     r.isFastest = idx === fastestIndex;
     r.isHighestScoring = idx === highestScoreIndex;
 
-    if (!anyScored) {
-      // All routes have insufficient mapped POI data: use provisional route-comparison labels
-      r.provisionalLabel = `Provisional Route Comparison: ${r.provisionalScore}/100`;
-      if (idx === fastestIndex && idx === highestScoreIndex) {
-        r.objective = "recommended";
-        r.objectiveLabel = "Fastest (highest provisional score)";
-        r.kind = "safest";
-      } else if (idx === fastestIndex) {
-        r.objective = "fastest";
-        r.objectiveLabel = "Fastest";
-        r.kind = "shortest";
-      } else if (idx === highestScoreIndex) {
-        r.objective = "safety-focused";
-        r.objectiveLabel = "Highest provisional score";
-        r.kind = "safest";
-      } else {
-        r.objectiveLabel = `Alternative ${mode}`;
-      }
+    if (idx === fastestIndex && idx === recommendedIndex && idx === highestScoreIndex) {
+      r.objective = "recommended";
+      r.objectiveLabel = "Recommended route (highest safety index & fastest)";
+      r.kind = "safest";
+    } else if (idx === recommendedIndex && idx === fastestIndex) {
+      r.objective = "recommended";
+      r.objectiveLabel = "Recommended (fastest)";
+      r.kind = "safest";
+    } else if (idx === recommendedIndex) {
+      r.objective = "recommended";
+      r.objectiveLabel = "Recommended safety route";
+      r.kind = "safest";
+    } else if (idx === highestScoreIndex) {
+      r.objective = "safety-focused";
+      r.objectiveLabel = "Highest Route Safety Index";
+      r.kind = "safest";
+    } else if (idx === fastestIndex) {
+      r.objective = "fastest";
+      r.objectiveLabel = "Fastest";
+      r.kind = "shortest";
     } else {
-      // Scored POI data exists
-      if (idx === fastestIndex && idx === recommendedIndex && idx === highestScoreIndex) {
-        r.objective = "recommended";
-        r.objectiveLabel = "Recommended activity route (also fastest)";
-        r.kind = "safest";
-      } else if (idx === recommendedIndex && idx === fastestIndex) {
-        r.objective = "recommended";
-        r.objectiveLabel = "Recommended (fastest)";
-        r.kind = "safest";
-      } else if (idx === recommendedIndex) {
-        r.objective = "recommended";
-        r.objectiveLabel = "Recommended activity route";
-        r.kind = "safest";
-      } else if (idx === highestScoreIndex) {
-        r.objective = "safety-focused";
-        r.objectiveLabel = "Highest activity score";
-        r.kind = "safest";
-      } else if (idx === fastestIndex) {
-        r.objective = "fastest";
-        r.objectiveLabel = "Fastest";
-        r.kind = "shortest";
-      } else {
-        r.objectiveLabel = `Alternative ${mode}`;
-      }
+      r.objectiveLabel = `Alternative ${mode}`;
     }
   });
 
-  // Sort so Recommended / Night activity-favoured is first, then Fastest, then others
+  // Sort so Recommended is first, then Highest Route Safety Index, then Fastest, then others
   enhancedRoutes.sort((a, b) => {
-    if (a.objectiveLabel?.includes("Recommended") || a.objectiveLabel?.includes("Night activity-favoured")) return -1;
-    if (b.objectiveLabel?.includes("Recommended") || b.objectiveLabel?.includes("Night activity-favoured")) return 1;
-    if (a.objective === "fastest") return -1;
-    if (b.objective === "fastest") return 1;
-    return (b.nightActivityScore ?? b.safetyScore) - (a.nightActivityScore ?? a.safetyScore);
+    if (a.objective === "recommended") return -1;
+    if (b.objective === "recommended") return 1;
+    if (a.isHighestScoring) return -1;
+    if (b.isHighestScoring) return 1;
+    if (a.isFastest) return -1;
+    if (b.isFastest) return 1;
+    return (b.routeSafetyIndex ?? b.safetyScore) - (a.routeSafetyIndex ?? a.safetyScore);
   });
 
   const count = enhancedRoutes.length;
