@@ -30,7 +30,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSahay } from "@/lib/sahay/context";
-import { isWithinPune, planSafeRoutes, searchPlaces } from "@/lib/sahay/routing-api";
+import {
+  isWithinPune,
+  planSafeRoutes,
+  searchPlacesDetailed,
+} from "@/lib/sahay/routing-api";
 import { countdownLabel } from "@/lib/sahay/safety";
 import {
   formatKm,
@@ -50,12 +54,56 @@ export const Route = createFileRoute("/journey")({ component: JourneyPage });
 async function resolvePlace(
   current: PlaceHit | null,
   query: string,
-): Promise<PlaceHit | null> {
-  if (current) return current;
+  fieldLabel: "origin" | "destination",
+): Promise<{ place: PlaceHit | null; error?: string }> {
   const text = query.trim();
-  if (text.length < 3) return null;
-  const hits = await searchPlaces({ data: { query: text } });
-  return hits[0] ?? null;
+  if (text.length === 0) {
+    return {
+      place: null,
+      error: `Please enter a ${fieldLabel === "origin" ? "start location" : "destination"} in Pune.`,
+    };
+  }
+
+  // If current was set and matches text, verify it has valid Pune coordinates
+  if (current) {
+    const isTextMatch = current.label.trim().toLowerCase() === text.toLowerCase();
+    const hasValidCoords =
+      typeof current.lat === "number" &&
+      !isNaN(current.lat) &&
+      typeof current.lng === "number" &&
+      !isNaN(current.lng);
+
+    if (isTextMatch && hasValidCoords) {
+      if (!isWithinPune(current.lat, current.lng)) {
+        return {
+          place: null,
+          error: `Selected ${fieldLabel} "${current.label}" is outside the supported Pune region.`,
+        };
+      }
+      return { place: current };
+    }
+  }
+
+  // Query must be at least 2 chars to search
+  if (text.length < 2) {
+    return {
+      place: null,
+      error: `Please enter at least 2 characters for ${fieldLabel === "origin" ? "start location" : "destination"}.`,
+    };
+  }
+
+  // Auto-resolve typed query
+  const res = await searchPlacesDetailed({ data: { query: text } });
+  if (res.hits.length > 0) {
+    return { place: res.hits[0] };
+  }
+
+  return {
+    place: null,
+    error:
+      res.error?.message ??
+      `Could not locate "${text}" in Pune. Please select a suggestion or refine your query.`,
+  };
 }
 
 function JourneyPage() {
@@ -268,15 +316,15 @@ function Planner({
 
   useEffect(() => {
     const q = fromQuery.trim();
-    if (q.length < 3 || from?.label === q) {
+    if (q.length < 2 || from?.label === q) {
       setFromHits([]);
       return;
     }
     let cancelled = false;
     const id = window.setTimeout(() => {
-      void searchPlaces({ data: { query: q } })
-        .then((hits) => {
-          if (!cancelled) setFromHits(hits.slice(0, 4));
+      void searchPlacesDetailed({ data: { query: q } })
+        .then((res) => {
+          if (!cancelled) setFromHits(res.hits.slice(0, 4));
         })
         .catch(() => {
           if (!cancelled) setFromHits([]);
@@ -290,15 +338,15 @@ function Planner({
 
   useEffect(() => {
     const q = toQuery.trim();
-    if (q.length < 3 || to?.label === q) {
+    if (q.length < 2 || to?.label === q) {
       setToHits([]);
       return;
     }
     let cancelled = false;
     const id = window.setTimeout(() => {
-      void searchPlaces({ data: { query: q } })
-        .then((hits) => {
-          if (!cancelled) setToHits(hits.slice(0, 4));
+      void searchPlacesDetailed({ data: { query: q } })
+        .then((res) => {
+          if (!cancelled) setToHits(res.hits.slice(0, 4));
         })
         .catch(() => {
           if (!cancelled) setToHits([]);
@@ -344,12 +392,20 @@ function Planner({
     setError("");
     setBusy("search");
     try {
-      const origin = await resolvePlace(from, fromQuery);
-      const destination = await resolvePlace(to, toQuery);
-      if (!origin || !destination) {
-        setError("Type a start and a destination in Pune, then pick a suggestion or search again.");
+      const originRes = await resolvePlace(from, fromQuery, "origin");
+      if (originRes.error || !originRes.place) {
+        setError(originRes.error ?? "Please specify a valid start location in Pune.");
         return;
       }
+      const destinationRes = await resolvePlace(to, toQuery, "destination");
+      if (destinationRes.error || !destinationRes.place) {
+        setError(destinationRes.error ?? "Please specify a valid destination in Pune.");
+        return;
+      }
+
+      const origin = originRes.place;
+      const destination = destinationRes.place;
+
       setFrom(origin);
       setFromQuery(origin.label);
       setFromHits([]);

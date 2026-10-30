@@ -431,3 +431,31 @@ test("Phase 6: Unified Route Safety Index (0-100) and factor consistency across 
   assert.ok(camFactor.maxScore > 0, "Camera max score > 0 when cameras are available");
   assert.equal(resultWithCam.factors.reduce((sum, f) => sum + f.maxScore, 0), 100);
 });
+
+test("Phase 7: Location search autocomplete and robust Pune resolution", async () => {
+  const { searchPlacesDetailed } = await import("./routing-api.ts");
+
+  // 1. Successful suggestions in Pune with coordinates (Vishwakarma Institute)
+  const vishwaRes = await searchPlacesDetailed({ data: { query: "Vishwakarma Institute" } });
+  assert.ok(vishwaRes.hits.length > 0, "Should find hits for Vishwakarma Institute");
+  const firstHit = vishwaRes.hits[0]!;
+  assert.ok(typeof firstHit.lat === "number" && typeof firstHit.lng === "number");
+  assert.ok(firstHit.lat >= 18.25 && firstHit.lat <= 18.75, "Latitude must be within Pune");
+  assert.ok(firstHit.lng >= 73.65 && firstHit.lng <= 74.15, "Longitude must be within Pune");
+
+  // 2. Query outside Pune bounds (e.g. Gateway of India in Mumbai)
+  const mumbaiRes = await searchPlacesDetailed({ data: { query: "Gateway of India Mumbai" } });
+  assert.equal(mumbaiRes.hits.length, 0, "Should filter out locations outside Pune");
+  assert.ok(mumbaiRes.error, "Should provide an explanatory error");
+  assert.equal(mumbaiRes.error?.code, "OUT_OF_BOUNDS");
+
+  // 3. Short / Empty query
+  const emptyRes = await searchPlacesDetailed({ data: { query: " " } });
+  assert.equal(emptyRes.hits.length, 0);
+
+  // 4. Non-existent place
+  const nonsenseRes = await searchPlacesDetailed({ data: { query: "xyzqwertynonexistentplace12345" } });
+  assert.equal(nonsenseRes.hits.length, 0);
+  assert.ok(nonsenseRes.error);
+  assert.equal(nonsenseRes.error?.code, "NOT_FOUND");
+});

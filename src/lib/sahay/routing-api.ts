@@ -126,15 +126,24 @@ export function mapPhotonFeatureToMappedPlace(
 // Search place cache to avoid repetitive queries
 const placeCache = new Map<string, PlaceHit[]>();
 
-export async function searchPlaces(input: {
+export class GeocodingError extends Error {
+  readonly code: "NETWORK_ERROR" | "TIMEOUT" | "OUT_OF_BOUNDS" | "NOT_FOUND" | "INVALID_INPUT";
+  constructor(message: string, code: "NETWORK_ERROR" | "TIMEOUT" | "OUT_OF_BOUNDS" | "NOT_FOUND" | "INVALID_INPUT") {
+    super(message);
+    this.name = "GeocodingError";
+    this.code = code;
+  }
+}
+
+export async function searchPlacesDetailed(input: {
   data: { query: string };
-}): Promise<PlaceHit[]> {
+}): Promise<{ hits: PlaceHit[]; error?: GeocodingError }> {
   const query = input.data.query.trim();
-  if (query.length < 2) return [];
+  if (query.length < 2) return { hits: [] };
 
   const cacheKey = query.toLowerCase();
   if (placeCache.has(cacheKey)) {
-    return placeCache.get(cacheKey)!;
+    return { hits: placeCache.get(cacheKey)! };
   }
 
   // Photon is designed and licensed specifically for client-side search/autocomplete.
@@ -144,15 +153,22 @@ export async function searchPlaces(input: {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=18.5204&lon=73.8567&limit=10&lang=en`;
     const payload = await fetchJson<{
       features?: PhotonFeature[];
-    }>(url, {}, 4500);
+    }>(url, {}, 5000);
 
-    const hits = (payload.features ?? [])
+    const rawFeatures = payload.features ?? [];
+    if (rawFeatures.length === 0) {
+      return { hits: [], error: new GeocodingError(`No locations found matching "${query}".`, "NOT_FOUND") };
+    }
+
+    let outOfPuneCount = 0;
+    const hits = rawFeatures
       .map((feature) => {
         const [lng, lat] = feature.geometry?.coordinates ?? [];
         if (typeof lat !== "number" || typeof lng !== "number") return null;
 
         // Strictly enforce Pune geographic boundary
         if (!isWithinPune(lat, lng)) {
+          outOfPuneCount++;
           return null;
         }
 
@@ -177,12 +193,41 @@ export async function searchPlaces(input: {
     const result = distinct.slice(0, 5);
     if (result.length > 0) {
       placeCache.set(cacheKey, result);
+      return { hits: result };
     }
-    return result;
+
+    if (outOfPuneCount > 0) {
+      return {
+        hits: [],
+        error: new GeocodingError(
+          `Found matching places for "${query}", but all results lie outside the supported Pune region.`,
+          "OUT_OF_BOUNDS",
+        ),
+      };
+    }
+
+    return {
+      hits: [],
+      error: new GeocodingError(`No Pune locations found matching "${query}".`, "NOT_FOUND"),
+    };
   } catch (err) {
     console.warn("Place search failed:", err);
-    return [];
+    const isAbort = err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
+    const error = new GeocodingError(
+      isAbort
+        ? "Location search timed out. Check connection and retry."
+        : "Location lookup service could not be reached. Check your network or retry.",
+      isAbort ? "TIMEOUT" : "NETWORK_ERROR",
+    );
+    return { hits: [], error };
   }
+}
+
+export async function searchPlaces(input: {
+  data: { query: string };
+}): Promise<PlaceHit[]> {
+  const { hits } = await searchPlacesDetailed(input);
+  return hits;
 }
 
 interface OsrmStep {
